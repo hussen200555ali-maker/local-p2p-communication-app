@@ -1,4 +1,5 @@
 import "dart:async";
+import "dart:io";
 import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
 
@@ -16,6 +17,10 @@ class CallVibrationService {
   // تهيئة الخدمة
   Future<void> initialize() async {
     if (_isInitialized) return;
+    if (Platform.isWindows || Platform.isLinux) {
+      _initializeFallback();
+      return;
+    }
 
     _methodChannel = const MethodChannel("call_vibration_service");
 

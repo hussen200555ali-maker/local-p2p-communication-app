@@ -1,8 +1,16 @@
+import 'dart:io';
 import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart' as ffi;
 import 'package:path/path.dart';
+import 'package:path_provider/path_provider.dart';
 import '../../features/auth/models/user_model.dart';
 import '../../features/chat/models/message_model.dart';
 import '../../features/chat/models/pending_message_model.dart';
+
+int? _firstIntValue(List<Map<String, Object?>>? results) {
+  if (results == null || results.isEmpty) return null;
+  return results.first.values.firstOrNull as int?;
+}
 
 class DatabaseService {
   static final DatabaseService _instance = DatabaseService._internal();
@@ -13,7 +21,12 @@ class DatabaseService {
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-    _database = await _initDb();
+    if (Platform.isWindows || Platform.isLinux) {
+      ffi.sqfliteFfiInit();
+      _database = await _initDbFfi();
+    } else {
+      _database = await _initDb();
+    }
     return _database!;
   }
 
@@ -25,6 +38,21 @@ class DatabaseService {
       version: 2,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
+    );
+  }
+
+  Future<Database> _initDbFfi() async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    final dbDir = join(docsDir.path, 'databases');
+    await Directory(dbDir).create(recursive: true);
+    final path = join(dbDir, 'local_social.db');
+    return await ffi.databaseFactoryFfi.openDatabase(
+      path,
+      options: ffi.OpenDatabaseOptions(
+        version: 2,
+        onCreate: (db, version) => _onCreate(db, version),
+        onUpgrade: (db, oldVersion, newVersion) => _onUpgrade(db, oldVersion, newVersion),
+      ),
     );
   }
 
@@ -102,16 +130,17 @@ class DatabaseService {
   // --- Message Methods ---
   Future<void> insertMessage(Message message) async {
     final db = await database;
-    await db.insert('messages', message.toJson(), conflictAlgorithm: ConflictAlgorithm.replace);
+    final json = message.toJson();
+    json['isRead'] = json.remove('read') == true ? 1 : 0;
+    if (json['edited'] is bool) json['edited'] = json['edited'] ? 1 : 0;
+    await db.insert('messages', json, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<List<Message>> getMessagesForUser(String userId, String friendId) async {
     final db = await database;
-    final maps = await db.query(
-      'messages',
-      where: '(senderId = ? AND receiverId = ?) OR (senderId = ? AND receiverId = ?)',
-      whereArgs: [userId, friendId, friendId, userId],
-      orderBy: 'timestamp ASC',
+    final maps = await db.rawQuery(
+      'SELECT id, senderId, receiverId, content, timestamp, isRead as "read", edited, editedAt FROM messages WHERE (senderId = ? AND receiverId = ?) OR (senderId = ? AND receiverId = ?) ORDER BY timestamp ASC',
+      [userId, friendId, friendId, userId],
     );
     return maps.map((json) => Message.fromJson(json)).toList();
   }
@@ -202,7 +231,7 @@ class DatabaseService {
   Future<int> getPendingMessageCount() async {
     final db = await database;
     final result = await db.rawQuery('SELECT COUNT(*) as count FROM pending_messages WHERE status = ?', ['pending']);
-    return Sqflite.firstIntValue(result) ?? 0;
+    return _firstIntValue(result) ?? 0;
   }
 
   Future<int> getPendingMessageCountForReceiver(String receiverId) async {
@@ -211,7 +240,15 @@ class DatabaseService {
       'SELECT COUNT(*) as count FROM pending_messages WHERE receiverId = ? AND status = ?',
       [receiverId, 'pending'],
     );
-    return Sqflite.firstIntValue(result) ?? 0;
+    return _firstIntValue(result) ?? 0;
+  }
+
+  Future<List<Message>> getAllMessages() async {
+    final db = await database;
+    final maps = await db.rawQuery(
+      'SELECT id, senderId, receiverId, content, timestamp, isRead as "read", edited, editedAt FROM messages ORDER BY timestamp ASC',
+    );
+    return maps.map((json) => Message.fromJson(json)).toList();
   }
 
   Future<void> deleteSentPendingMessages() async {

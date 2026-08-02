@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:local_social_app/features/settings/screens/settings_screen.dart';
 
 void main() {
   group('Settings Persistence', () {

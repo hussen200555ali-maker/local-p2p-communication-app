@@ -60,7 +60,7 @@ class _CallSettingsScreenState extends State<CallSettingsScreen> {
     try {
       await _audioPlayer.setVolume(_callVolume);
       if (_selectedRingtone == 'default') {
-        await _audioPlayer.play(AssetSource('sounds/ringtone.mp3'));
+        await _audioPlayer.play(AssetSource('sounds/ringtone.wav'));
       } else {
         await _audioPlayer.play(DeviceFileSource(_selectedRingtone));
       }
@@ -247,7 +247,7 @@ class _CallSettingsScreenState extends State<CallSettingsScreen> {
         min: 0.0,
         max: 1.0,
         divisions: 10,
-        activeColor: Colors.teal,
+      activeColor: Colors.teal,
         onChanged: (value) {
           setState(() {
             _callVolume = value;

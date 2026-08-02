@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:iconsax/iconsax.dart';
 import 'package:intl/intl.dart' show DateFormat;
-import 'dart:async';
 import '../../../core/services/local_network_service.dart';
 import '../../auth/models/user_model.dart';
 import '../call_integration.dart';
@@ -22,11 +21,9 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> with TickerProvid
   
   // متحكمات الرسوم المتحركة
   late AnimationController _fadeController;
-  late AnimationController _scaleController;
   
   // الرسوم المتحركة
   late Animation<double> _fadeAnimation;
-  late Animation<double> _scaleAnimation;
 
   String? _filterValue = 'الكل';
 
@@ -58,33 +55,16 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> with TickerProvid
       curve: Curves.easeIn,
     ));
     
-    // إعداد متحكم التكبير
-    _scaleController = AnimationController(
-      duration: const Duration(milliseconds: 800),
-      vsync: this,
-    );
-    _scaleAnimation = Tween<double>(
-      begin: 0.8,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _scaleController,
-      curve: Curves.elasticOut,
-    ));
   }
   
   void _startAnimations() {
     // بدء الرسوم المتحركة بالتسلسل
     _fadeController.forward();
-    
-    Future.delayed(const Duration(milliseconds: 200), () {
-      _scaleController.forward();
-    });
   }
 
   @override
   void dispose() {
     _fadeController.dispose();
-    _scaleController.dispose();
     super.dispose();
   }
 
@@ -227,6 +207,7 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> with TickerProvid
 
   List<Map<String, dynamic>> _groupCallsByDate(List<CallModel> calls) {
     final Map<String, List<CallModel>> grouped = {};
+    final Map<String, DateTime> groupDates = {};
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final yesterday = today.subtract(const Duration(days: 1));
@@ -249,13 +230,13 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> with TickerProvid
 
       if (!grouped.containsKey(dateLabel)) {
         grouped[dateLabel] = [];
+        groupDates[dateLabel] = callDate;
       }
       grouped[dateLabel]!.add(call);
     }
 
-    // تحويل القائمة إلى قائمة مرتبة حسب التاريخ (الأحدث أولاً)
     final sortedGroups = grouped.entries.toList()
-      ..sort((a, b) => b.key.compareTo(a.key));
+      ..sort((a, b) => groupDates[b.key]!.compareTo(groupDates[a.key]!));
 
     return sortedGroups.map((entry) => {
       'date': entry.key,
@@ -333,8 +314,7 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> with TickerProvid
       case CallStatus.rejected:
         return isOutgoing ? 'مرفوضة' : 'مرفوضة';
       case CallStatus.connecting:
-        // TODO: Handle this case.
-        throw UnimplementedError();
+        return 'جاري الاتصال...';
     }
   }
 

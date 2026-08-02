@@ -6,6 +6,7 @@ import 'package:iconsax/iconsax.dart';
 import 'package:uuid/uuid.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:path/path.dart' as p;
 
 import '../../../core/services/local_network_service.dart';
 import '../../auth/models/user_model.dart';
@@ -90,11 +91,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                   itemBuilder: (context, index) {
                     final member = members[index];
                     final isAdmin = member.id == widget.group.adminId;
-                    final isOnline = _networkService.getConnectedFriends().any((u) => u.id == member.id);
+                    final isOnline = _networkService.showOnlineStatus && _networkService.getConnectedFriends().any((u) => u.id == member.id);
+                    final isDoubtful = _networkService.isFriendDoubtful(member.id);
 
                     return ListTile(
                       leading: CircleAvatar(
-                        backgroundColor: isOnline ? Colors.teal : Colors.grey,
+                        backgroundColor: isDoubtful ? Colors.orange : (isOnline ? Colors.teal : Colors.grey),
                         child: Text(
                           member.username.isNotEmpty 
                               ? member.username.substring(0, 1).toUpperCase() 
@@ -107,9 +109,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       subtitle: Text(
-                        isOnline ? 'متصل الآن' : 'غير متصل',
+                        isDoubtful ? 'جارٍ التحقق...' : (isOnline ? 'متصل الآن' : 'غير متصل'),
                         style: TextStyle(
-                          color: isOnline ? Colors.green : Colors.grey,
+                          color: isDoubtful ? Colors.orange : (isOnline ? Colors.green : Colors.grey),
                         ),
                       ),
                       trailing: isAdmin 
@@ -174,42 +176,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
-  // حذف جميع رسائل المجموعة
-  void _clearGroupMessages() {
-    setState(() {
-      _messages.clear();
-      _fileMessages.clear();
-    });
-
-    _networkService.deleteGroupMessages(widget.group.id);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('تم حذف جميع رسائل المجموعة')),
-    );
-  }
-
-  // تنسيق التاريخ والوقت
-  String _formatDateTime(DateTime dateTime) {
-    final now = DateTime.now();
-    final difference = now.difference(dateTime);
-
-    if (difference.inDays == 0) {
-      if (difference.inHours == 0) {
-        if (difference.inMinutes == 0) {
-          return 'الآن';
-        }
-        return 'منذ ${difference.inMinutes} دقيقة';
-      }
-      return 'منذ ${difference.inHours} ساعة';
-    } else if (difference.inDays == 1) {
-      final time = TimeOfDay.fromDateTime(dateTime);
-      return 'الأمس في ${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
-    } else if (difference.inDays < 7) {
-      return 'منذ ${difference.inDays} أيام';
-    } else {
-      return '${dateTime.day}/${dateTime.month}/${dateTime.year}';
-    }
-  }
-
   @override
   void initState() {
     super.initState();
@@ -220,6 +186,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
     // **الإصلاح**: تسجيل دالة رد النداء لرسائل المجموعة
     _networkService.registerCallbacks(
+      onFriendsChanged: () {
+        if (mounted) setState(() {});
+      },
       onGroupMessageReceived: (message) {
         if (message.groupId == widget.group.id && mounted) {
           final existingIndex = _messages.indexWhere((m) => m.id == message.id);
@@ -334,9 +303,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           SnackBar(content: Text('جاري إرسال الملف: $fileName...')),
         );
 
+        final appDir = Directory('${file.parent.path}');
+        final savedFile = await file.copy('${appDir.path}/${fileMessage.id}_${p.basename(file.path)}');
+
         for (final memberId in widget.group.memberIds) {
           if (memberId != _currentUser.id) {
-            await _networkService.sendFileMessage(memberId, file, fileType, groupId: widget.group.id);
+            await _networkService.sendFileMessage(memberId, file, fileType, groupId: widget.group.id, savedPath: savedFile.path);
           }
         }
       }
@@ -486,14 +458,22 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: 5.0, horizontal: 8.0),
           padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
+          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
           decoration: BoxDecoration(
-            color: isMe ? Colors.teal.shade300 : Colors.grey.shade200,
+            color: isMe ? Colors.teal.shade600 : Colors.white,
             borderRadius: BorderRadius.only(
               topLeft: const Radius.circular(16),
               topRight: const Radius.circular(16),
-              bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
-              bottomRight: isMe ? Radius.zero : const Radius.circular(16),
+              bottomLeft: isMe ? const Radius.circular(16) : const Radius.circular(2),
+              bottomRight: isMe ? const Radius.circular(2) : const Radius.circular(16),
             ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              ),
+            ],
           ),
           child: Column(
             crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -501,12 +481,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               if (!isMe)
                 Text(
                   _getSenderName(message.senderId),
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.teal),
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: Colors.teal.shade700),
                 ),
               if (!isMe) const SizedBox(height: 4),
               Text(
                 message.content,
-                style: TextStyle(color: isMe ? Colors.white : Colors.black87),
+                style: TextStyle(color: isMe ? Colors.white : Colors.black87, fontSize: 15, height: 1.3),
               ),
               const SizedBox(height: 4),
               Row(
@@ -517,16 +497,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                     Text(
                       'تم التعديل ',
                       style: TextStyle(
-                        fontSize: 10,
+                        fontSize: 11,
                         fontStyle: FontStyle.italic,
-                        color: isMe ? Colors.white70 : Colors.black54,
+                        color: isMe ? Colors.white60 : Colors.grey.shade500,
                       ),
                     ),
                   Text(
                     _formatDateTime(message.timestamp),
                     style: TextStyle(
-                      fontSize: 10,
-                      color: isMe ? Colors.white70 : Colors.black54,
+                      fontSize: 11,
+                      color: isMe ? Colors.white60 : Colors.grey.shade500,
                     ),
                   ),
                 ],
@@ -570,13 +550,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               if (!isMe) const SizedBox(height: 4),
               InkWell(
                 onTap: () async {
-                  try {
-                    await OpenFilex.open(message.filePath);
-                  } catch (e) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('لا يمكن فتح الملف: $e'), backgroundColor: Colors.red),
-                      );
+                  if (!Platform.isLinux) {
+                    try {
+                      await OpenFilex.open(message.filePath);
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('لا يمكن فتح الملف: $e'), backgroundColor: Colors.red),
+                        );
+                      }
                     }
                   }
                 },
@@ -946,5 +928,27 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('تم حذف الرسالة')),
     );
+  }
+
+  String _formatDateTime(DateTime dateTime) {
+    final now = DateTime.now();
+    final difference = now.difference(dateTime);
+
+    if (difference.inDays == 0) {
+      if (difference.inHours == 0) {
+        if (difference.inMinutes == 0) {
+          return 'الآن';
+        }
+        return 'منذ ${difference.inMinutes} دقيقة';
+      }
+      return 'منذ ${difference.inHours} ساعة';
+    } else if (difference.inDays == 1) {
+      final time = TimeOfDay.fromDateTime(dateTime);
+      return 'الأمس في ${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+    } else if (difference.inDays < 7) {
+      return 'منذ ${difference.inDays} أيام';
+    } else {
+      return '${dateTime.day}/${dateTime.month}/${dateTime.year}';
+    }
   }
 }

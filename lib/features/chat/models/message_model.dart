@@ -36,8 +36,8 @@ class Message {
     receiverId: json['receiverId'],
     content: json['content'],
     timestamp: DateTime.parse(json['timestamp']),
-    read: json['read'] ?? false,
-    edited: json['edited'] ?? false,
+    read: json['read'] is bool ? json['read'] : (json['read'] ?? 0) == 1,
+    edited: json['edited'] is bool ? json['edited'] : (json['edited'] ?? 0) == 1,
     editedAt: json['editedAt'] != null ? DateTime.parse(json['editedAt']) : null,
   );
 }

@@ -22,6 +22,7 @@ class CallNotificationService {
     required VoidCallback onAccept,
     required VoidCallback onReject,
   }) async {
+    await SystemNotificationService().initialize();
     try {
       final id = await SystemNotificationService().showNotification(
         title: 'مكالمة واردة',
@@ -40,6 +41,7 @@ class CallNotificationService {
     required User otherUser,
     int duration = 0,
   }) async {
+    await SystemNotificationService().initialize();
     final minutes = (duration ~/ 60).toString().padLeft(2, '0');
     final seconds = (duration % 60).toString().padLeft(2, '0');
     final durationText = '$minutes:$seconds';

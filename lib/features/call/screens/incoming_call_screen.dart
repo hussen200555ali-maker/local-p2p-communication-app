@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:ui' as ui;
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:iconsax/iconsax.dart';
 import '../../auth/models/user_model.dart';
 import '../models/call_model.dart';
 import '../services/call_manager.dart';
+import 'call_screen.dart';
 
 class IncomingCallScreen extends StatefulWidget {
   final CallModel call;
@@ -29,15 +29,11 @@ class IncomingCallScreen extends StatefulWidget {
 class _IncomingCallScreenState extends State<IncomingCallScreen>
     with TickerProviderStateMixin {
   final CallManager _callManager = CallManager();
-  final AudioPlayer _audioPlayer = AudioPlayer();
 
   late AnimationController _scaleController;
   late AnimationController _slideController;
-  late AnimationController _fadeController;
 
   late Animation<double> _scaleAnimation;
-  late Animation<Offset> _slideAnimation;
-  late Animation<double> _fadeAnimation;
 
   @override
   void initState() {
@@ -73,33 +69,10 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
       duration: const Duration(milliseconds: 600),
       vsync: this,
     );
-    _slideAnimation = Tween<Offset>(
-      begin: const Offset(0, 0.3),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _slideController,
-      curve: Curves.easeOutCubic,
-    ));
-    
-    _fadeController = AnimationController(
-      duration: const Duration(milliseconds: 400),
-      vsync: this,
-    );
-    _fadeAnimation = Tween<double>(
-      begin: 0.0,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _fadeController,
-      curve: Curves.easeIn,
-    ));
   }
   
   void _startAnimations() {
-    _fadeController.forward();
-    
-    Future.delayed(const Duration(milliseconds: 200), () {
-      _scaleController.forward();
-    });
+    _scaleController.forward();
     
     Future.delayed(const Duration(milliseconds: 600), () {
       _slideController.forward();
@@ -109,7 +82,6 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
   void _stopAnimations() {
     _scaleController.stop();
     _slideController.stop();
-    _fadeController.stop();
   }
 
   @override
@@ -118,7 +90,6 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     
     _scaleController.dispose();
     _slideController.dispose();
-    _fadeController.dispose();
     
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
     
@@ -127,14 +98,23 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
 
   void _handleAccept() {
     _stopAnimations();
-    _callManager.acceptCall(widget.call.id);
-    widget.onAccept();
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          friend: widget.caller,
+          isCaller: false,
+          callId: widget.call.id,
+          callType: widget.call.callType,
+        ),
+      ),
+    );
   }
 
   void _handleReject() {
     _stopAnimations();
     _callManager.rejectCall(widget.call.id);
-    widget.onReject();
+    Navigator.pop(context);
   }
 
   @override

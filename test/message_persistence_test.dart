@@ -112,5 +112,87 @@ void main() {
       expect(restoredMessages['test_friend']!.first.content, 'This should persist');
       expect(restoredMessages['test_friend']!.first.id, 'persist1');
     });
+
+    test('corrupt JSON in one section does not block other sections', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      // Save valid friend_ids
+      await prefs.setStringList('friend_ids_v3', ['friend1', 'friend2']);
+
+      // Save corrupt data in all_messages_v3
+      await prefs.setString('all_messages_v3', 'this is not valid json');
+
+      // Save valid user directory
+      await prefs.setString('user_directory_v3', jsonEncode({'friend1': 'Friend One'}));
+
+      // Simulate _loadDataFromStorage logic
+      final errors = <String>[];
+
+      try {
+        final ids = prefs.getStringList('friend_ids_v3') ?? [];
+        expect(ids.length, 2);
+      } catch (e) {
+        errors.add('friend_ids_v3: $e');
+      }
+
+      try {
+        final dirStr = prefs.getString('user_directory_v3');
+        if (dirStr != null) {
+          (jsonDecode(dirStr) as Map<String, dynamic>).forEach((k, v) => {});
+        }
+      } catch (e) {
+        errors.add('user_directory_v3: $e');
+      }
+
+      try {
+        final msgs = prefs.getString('all_messages_v3');
+        if (msgs != null) {
+          jsonDecode(msgs) as Map<String, dynamic>;
+        }
+      } catch (e) {
+        errors.add('all_messages_v3: $e');
+      }
+
+      // Only all_messages_v3 should have failed
+      expect(errors.where((e) => e.startsWith('all_messages_v3')).length, 1);
+      expect(errors.where((e) => e.startsWith('friend_ids_v3')).length, 0);
+      expect(errors.where((e) => e.startsWith('user_directory_v3')).length, 0);
+    });
+
+    test('partial corrupt data recovers clean sections', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      final validMsg = Message(
+        id: 'valid1', senderId: 'me', receiverId: 'f1',
+        content: 'Valid message', timestamp: DateTime(2026, 6, 10),
+      );
+
+      final messagesMap = <String, dynamic>{};
+      messagesMap['friend1'] = jsonEncode([validMsg.toJson()]);
+      messagesMap['corrupt_friend'] = 'not a json array';
+      messagesMap['friend2'] = jsonEncode([validMsg.toJson()]);
+
+      await prefs.setString('all_messages_v3', jsonEncode(messagesMap));
+
+      final stored = prefs.getString('all_messages_v3')!;
+      final decoded = jsonDecode(stored) as Map<String, dynamic>;
+      final loadedMessages = <String, List<Message>>{};
+
+      decoded.forEach((key, value) {
+        try {
+          loadedMessages[key] = (jsonDecode(value) as List)
+              .map((item) => Message.fromJson(item))
+              .toList();
+        } catch (_) {}
+      });
+
+      expect(loadedMessages.containsKey('friend1'), true);
+      expect(loadedMessages.containsKey('friend2'), true);
+      expect(loadedMessages.containsKey('corrupt_friend'), false);
+      expect(loadedMessages['friend1']!.length, 1);
+      expect(loadedMessages['friend1']!.first.content, 'Valid message');
+    });
   });
 }

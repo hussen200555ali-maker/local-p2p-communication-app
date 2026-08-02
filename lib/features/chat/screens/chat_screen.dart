@@ -74,6 +74,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _registerServiceCallbacks() {
     _networkService.registerCallbacks(
+        onFriendsChanged: () {
+          if (mounted) setState(() {});
+        },
         onPrivateMessageReceived: (message) {
           if (_isMessageForThisChat(message.senderId, message.receiverId) && mounted) {
             setState(() {
@@ -183,9 +186,41 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _pickAndSendFile() async {
-    var status = await Permission.storage.request();
+    if (!Platform.isWindows && !Platform.isLinux) {
+      var status = await Permission.storage.request();
 
-    if (status.isGranted) {
+      if (status.isGranted) {
+        try {
+          FilePickerResult? result = await FilePicker.platform.pickFiles();
+          if (result != null && result.files.single.path != null) {
+            File file = File(result.files.single.path!);
+            String fileType = result.files.single.extension ?? 'file';
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('جاري إرسال الملف: ${result.files.single.name}...')),
+            );
+            await _networkService.sendFileMessage(widget.friend.id, file, fileType);
+          }
+        } catch (e) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('حدث خطأ أثناء اختيار الملف: $e'), backgroundColor: Colors.red),
+          );
+        }
+      } else if (status.isPermanentlyDenied) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('تم رفض إذن الوصول للملفات. يرجى التفعيل من الإعدادات.'),
+            action: SnackBarAction(
+              label: 'الإعدادات',
+              onPressed: openAppSettings,
+            ),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('إذن الوصول للملفات مطلوب لإرسال الملفات.')),
+        );
+      }
+    } else {
       try {
         FilePickerResult? result = await FilePicker.platform.pickFiles();
         if (result != null && result.files.single.path != null) {
@@ -201,20 +236,6 @@ class _ChatScreenState extends State<ChatScreen> {
           SnackBar(content: Text('حدث خطأ أثناء اختيار الملف: $e'), backgroundColor: Colors.red),
         );
       }
-    } else if (status.isPermanentlyDenied) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('تم رفض إذن الوصول للملفات. يرجى التفعيل من الإعدادات.'),
-          action: SnackBarAction(
-            label: 'الإعدادات',
-            onPressed: openAppSettings,
-          ),
-        ),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('إذن الوصول للملفات مطلوب لإرسال الملفات.')),
-      );
     }
   }
 
@@ -230,20 +251,39 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isConnected = _networkService.showOnlineStatus && _networkService.getConnectedFriends().any((u) => u.id == widget.friend.id);
+    final isDoubtful = _networkService.isFriendDoubtful(widget.friend.id);
+
     return Scaffold(
       appBar: AppBar(
         title: Row(
           children: [
-            CircleAvatar(
-              backgroundColor: _networkService.getConnectedFriends().any((u) => u.id == widget.friend.id) 
-                  ? Colors.teal 
-                  : Colors.grey,
-              child: Text(
-                widget.friend.username.isNotEmpty 
-                    ? widget.friend.username.substring(0, 1).toUpperCase() 
-                    : '?',
-                style: const TextStyle(color: Colors.white),
-              ),
+            Stack(
+              children: [
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor: isDoubtful ? Colors.orange : (isConnected ? Colors.teal.shade600 : Colors.grey),
+                  child: Text(
+                    widget.friend.username.isNotEmpty 
+                        ? widget.friend.username.substring(0, 1).toUpperCase() 
+                        : '?',
+                    style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
+                    width: 12,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      color: isDoubtful ? Colors.orange : (isConnected ? Colors.green : Colors.grey.shade400),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -252,24 +292,39 @@ class _ChatScreenState extends State<ChatScreen> {
                 children: [
                   Text(
                     widget.friend.username,
-                    style: const TextStyle(fontSize: 18),
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                   ),
-                  Text(
-                    _isTyping 
-                        ? 'يكتب الآن...' 
-                        : (_networkService.getConnectedFriends().any((u) => u.id == widget.friend.id) 
-                            ? 'متصل' 
-                            : 'غير متصل'),
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: _isTyping 
-                          ? Colors.greenAccent 
-                          : (_networkService.getConnectedFriends().any((u) => u.id == widget.friend.id) 
-                              ? Colors.white70 
-                              : Colors.white54),
-                      fontStyle: _isTyping ? FontStyle.italic : FontStyle.normal,
+                  if (_isTyping)
+                    Text(
+                      'يكتب الآن...',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.greenAccent.shade100,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    )
+                  else if (isDoubtful)
+                    Row(
+                      children: [
+                        SizedBox(
+                          width: 10, height: 10,
+                          child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.orange.shade300),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'جارٍ التحقق...',
+                          style: TextStyle(fontSize: 12, color: Colors.orange.shade200, fontStyle: FontStyle.italic),
+                        ),
+                      ],
+                    )
+                  else
+                    Text(
+                      isConnected ? 'متصل' : 'غير متصل',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isConnected ? Colors.white70 : Colors.white54,
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -337,19 +392,27 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 5.0, horizontal: 8.0),
         padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
         decoration: BoxDecoration(
-          color: isMe ? Colors.teal.shade300 : Colors.grey.shade200,
+          color: isMe ? Colors.teal.shade600 : Colors.white,
           borderRadius: BorderRadius.only(
             topLeft: const Radius.circular(16),
             topRight: const Radius.circular(16),
-            bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
-            bottomRight: isMe ? Radius.zero : const Radius.circular(16),
+            bottomLeft: isMe ? const Radius.circular(16) : const Radius.circular(2),
+            bottomRight: isMe ? const Radius.circular(2) : const Radius.circular(16),
           ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.08),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(message.content, style: TextStyle(color: isMe ? Colors.white : Colors.black87)),
+            Text(message.content, style: TextStyle(color: isMe ? Colors.white : Colors.black87, fontSize: 15, height: 1.3)),
             const SizedBox(height: 4),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -358,16 +421,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 if (isMe) ...[
                   _buildDeliveryStatusIcon(deliveryStatus, message.read),
                   const SizedBox(width: 4),
-                  Text(
-                    _formatDateTime(message.timestamp),
-                    style: TextStyle(fontSize: 10, color: isMe ? Colors.white70 : Colors.black54),
-                  ),
-                ] else ...[
-                  Text(
-                    _formatDateTime(message.timestamp),
-                    style: TextStyle(fontSize: 10, color: isMe ? Colors.white70 : Colors.black54),
-                  ),
                 ],
+                Text(
+                  _formatDateTime(message.timestamp),
+                  style: TextStyle(fontSize: 11, color: isMe ? Colors.white60 : Colors.grey.shade500),
+                ),
               ],
             ),
           ],
@@ -378,7 +436,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildDeliveryStatusIcon(DeliveryStatus? status, bool read) {
-    if (read) {
+    if (read && _networkService.readReceipts) {
       return Icon(Iconsax.tick_circle2, size: 16, color: Colors.lightBlue.shade200);
     }
     switch (status) {
@@ -419,12 +477,18 @@ class _ChatScreenState extends State<ChatScreen> {
         builder: (_) => Scaffold(
           backgroundColor: Colors.black,
           appBar: AppBar(
-            backgroundColor: Colors.black,
+            backgroundColor: Colors.black.withOpacity(0.7),
             iconTheme: const IconThemeData(color: Colors.white),
+            elevation: 0,
           ),
-          body: Center(
-            child: InteractiveViewer(
-              child: Image.file(File(filePath), fit: BoxFit.contain),
+          body: GestureDetector(
+            onTap: () => Navigator.pop(context),
+            child: Center(
+              child: InteractiveViewer(
+                minScale: 0.5,
+                maxScale: 4.0,
+                child: Image.file(File(filePath), fit: BoxFit.contain),
+              ),
             ),
           ),
         ),
@@ -443,33 +507,42 @@ class _ChatScreenState extends State<ChatScreen> {
           if (isImage && File(message.filePath).existsSync()) {
             _showImagePreview(context, message.filePath);
           } else {
-            try {
-              await OpenFilex.open(message.filePath);
-            } catch (e) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('لا يمكن فتح الملف: $e'), backgroundColor: Colors.red),
-              );
+            if (!Platform.isLinux) {
+              try {
+                await OpenFilex.open(message.filePath);
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('لا يمكن فتح الملف: $e'), backgroundColor: Colors.red),
+                );
+              }
             }
           }
         },
         onLongPress: () => _showMessageOptions(message),
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: 5.0, horizontal: 8.0),
-          padding: const EdgeInsets.all(12.0),
-          width: isImage ? 240 : 220,
+          padding: const EdgeInsets.all(8.0),
+          width: isImage ? 250 : 220,
           decoration: BoxDecoration(
-            color: isMe ? Colors.teal.shade300 : Colors.grey.shade200,
+            color: isMe ? Colors.teal.shade600 : Colors.white,
             borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              ),
+            ],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (isImage && File(message.filePath).existsSync())
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(12),
                   child: Image.file(
                     File(message.filePath),
-                    height: 180,
+                    height: 200,
                     width: double.infinity,
                     fit: BoxFit.cover,
                     errorBuilder: (_, __, ___) => _buildFileIcon(message, isMe),
@@ -478,15 +551,22 @@ class _ChatScreenState extends State<ChatScreen> {
               else
                 Row(
                   children: [
-                    _buildFileIcon(message, isMe),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: (isMe ? Colors.white : Colors.teal).withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: _buildFileIcon(message, isMe),
+                    ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(message.fileName, style: TextStyle(fontWeight: FontWeight.bold, color: isMe ? Colors.white : Colors.black87), overflow: TextOverflow.ellipsis),
-                          const SizedBox(height: 4),
-                          Text(formatBytes(message.fileSize, 1), style: TextStyle(fontSize: 12, color: isMe ? Colors.white70 : Colors.black54)),
+                          Text(message.fileName, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: isMe ? Colors.white : Colors.black87), overflow: TextOverflow.ellipsis),
+                          const SizedBox(height: 2),
+                          Text(formatBytes(message.fileSize, 1), style: TextStyle(fontSize: 11, color: isMe ? Colors.white60 : Colors.grey.shade500)),
                         ],
                       ),
                     ),
@@ -500,16 +580,11 @@ class _ChatScreenState extends State<ChatScreen> {
               if (isMe) ...[
                 _buildDeliveryStatusIcon(_messageStatuses[message.id], message.read),
                 const SizedBox(width: 4),
-                Text(
-                  _formatDateTime(message.timestamp),
-                  style: TextStyle(fontSize: 10, color: isMe ? Colors.white70 : Colors.black54),
-                ),
-              ] else ...[
-                Text(
-                  _formatDateTime(message.timestamp),
-                  style: TextStyle(fontSize: 10, color: isMe ? Colors.white70 : Colors.black54),
-                ),
               ],
+              Text(
+                _formatDateTime(message.timestamp),
+                style: TextStyle(fontSize: 11, color: isMe ? Colors.white60 : Colors.grey.shade500),
+              ),
             ],
           ),
         ],
@@ -521,34 +596,56 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildMessageInputField() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 10.0),
+      padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8.0),
       decoration: BoxDecoration(
         color: Theme.of(context).cardColor,
-        boxShadow: [BoxShadow(offset: const Offset(0, -1), blurRadius: 2, color: Colors.black.withValues(alpha: 0.05))],
+        boxShadow: [BoxShadow(offset: const Offset(0, -1), blurRadius: 4, color: Colors.black.withOpacity(0.06))],
       ),
       child: SafeArea(
         child: Row(
           children: [
-            IconButton(icon: const Icon(Iconsax.gallery, color: Colors.grey), onPressed: _pickAndSendImage),
-            IconButton(icon: const Icon(Iconsax.attach_square, color: Colors.grey), onPressed: _pickAndSendFile),
+            IconButton(icon: const Icon(Iconsax.gallery, color: Colors.teal, size: 24), onPressed: _pickAndSendImage),
+            IconButton(icon: const Icon(Iconsax.attach_square, color: Colors.teal, size: 24), onPressed: _pickAndSendFile),
             Expanded(
-              child: TextField(
-                controller: _messageController,
-                decoration: const InputDecoration(hintText: 'اكتب رسالتك...', border: InputBorder.none),
-                onSubmitted: (_) => _sendMessage(),
-                onChanged: (value) {
-                  // إرسال حالة الكتابة مع تحسين الأداء
-                  _networkService.sendTypingStatus(widget.friend.id, true);
-
-                  // إعادة تعيين المؤقت
-                  _typingTimer?.cancel();
-                  _typingTimer = Timer(const Duration(seconds: 1), () {
-                    _networkService.sendTypingStatus(widget.friend.id, false);
-                  });
-                },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: TextField(
+                  controller: _messageController,
+                  decoration: InputDecoration(
+                    hintText: 'اكتب رسالتك...',
+                    hintStyle: TextStyle(color: Colors.grey.shade400),
+                    border: InputBorder.none,
+                  ),
+                  maxLines: 4,
+                  minLines: 1,
+                  textInputAction: TextInputAction.newline,
+                  onSubmitted: (_) => _sendMessage(),
+                  onChanged: (value) {
+                    _networkService.sendTypingStatus(widget.friend.id, true);
+                    _typingTimer?.cancel();
+                    _typingTimer = Timer(const Duration(seconds: 1), () {
+                      _networkService.sendTypingStatus(widget.friend.id, false);
+                    });
+                  },
+                ),
               ),
             ),
-            IconButton(icon: const Icon(Iconsax.send_1, color: Colors.teal), onPressed: _sendMessage),
+            const SizedBox(width: 4),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: const BoxDecoration(
+                color: Colors.teal,
+                shape: BoxShape.circle,
+              ),
+              child: InkWell(
+                onTap: _sendMessage,
+                child: const Icon(Iconsax.send_1, color: Colors.white, size: 20),
+              ),
+            ),
           ],
         ),
       ),
@@ -664,7 +761,8 @@ class _ChatScreenState extends State<ChatScreen> {
   // عرض معلومات الصديق
   void _showFriendInfo() {
     final userStatus = _networkService.getUserStatuses()[widget.friend.id];
-    final isConnected = _networkService.getConnectedFriends().any((u) => u.id == widget.friend.id);
+    final isConnected = _networkService.showOnlineStatus && _networkService.getConnectedFriends().any((u) => u.id == widget.friend.id);
+    final isDoubtful = _networkService.isFriendDoubtful(widget.friend.id);
 
     showDialog(
       context: context,
@@ -677,7 +775,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Row(
               children: [
                 CircleAvatar(
-                  backgroundColor: isConnected ? Colors.teal : Colors.grey,
+                  backgroundColor: isDoubtful ? Colors.orange : (isConnected ? Colors.teal : Colors.grey),
                   child: Text(widget.friend.username.isNotEmpty ? widget.friend.username.substring(0, 1).toUpperCase() : '?'),
                 ),
                 const SizedBox(width: 16),
@@ -685,9 +783,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      isConnected ? 'متصل الآن' : 'غير متصل',
+                      isDoubtful ? 'جارٍ التحقق...' : (isConnected ? 'متصل الآن' : 'غير متصل'),
                       style: TextStyle(
-                        color: isConnected ? Colors.green : Colors.grey,
+                        color: isDoubtful ? Colors.orange : (isConnected ? Colors.green : Colors.grey),
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -963,39 +1061,19 @@ class _ChatScreenState extends State<ChatScreen> {
   void _listenToConnectionStatus() {
     // التحقق من حالة الاتصال الأولية
     setState(() {
-      _isConnected = _networkService.getConnectedFriends().any((u) => u.id == widget.friend.id);
+      _isConnected = _networkService.showOnlineStatus && _networkService.getConnectedFriends().any((u) => u.id == widget.friend.id);
     });
 
     // الاستماع لتغييرات حالة الاتصال
     _connectionSubscription = Stream.periodic(const Duration(seconds: 3), (_) => null)
         .listen((_) {
-      final isConnected = _networkService.getConnectedFriends().any((u) => u.id == widget.friend.id);
+      final isConnected = _networkService.showOnlineStatus && _networkService.getConnectedFriends().any((u) => u.id == widget.friend.id);
       if (isConnected != _isConnected) {
         setState(() {
           _isConnected = isConnected;
         });
       }
     });
-  }
-
-  Future<bool> _handlePermissions(CallType callType) async {
-    PermissionStatus microphoneStatus = await Permission.microphone.request();
-    if (callType == CallType.video) {
-      PermissionStatus cameraStatus = await Permission.camera.request();
-      if (!cameraStatus.isGranted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('إذن الكاميرا مطلوب لمكالمات الفيديو')),
-        );
-        return false;
-      }
-    }
-    if (!microphoneStatus.isGranted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('إذن الميكروفون مطلوب للمكالمات')),
-      );
-      return false;
-    }
-    return true;
   }
 
   void _startCall(CallType callType) async {

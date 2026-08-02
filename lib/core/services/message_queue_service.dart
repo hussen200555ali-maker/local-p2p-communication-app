@@ -145,6 +145,64 @@ class MessageQueueService {
             continue;
           }
 
+          if (pending.messageType == 'file') {
+            final metadata = jsonDecode(pending.fileMetadata!);
+            final filePath = metadata['filePath'] as String;
+            final fileName = metadata['fileName'] as String;
+            final fileType = metadata['fileType'] as String;
+            final fileSize = metadata['fileSize'] as int;
+
+            final file = File(filePath);
+            if (!await file.exists()) {
+              await markFailed(pending.id);
+              continue;
+            }
+
+            final fileBytes = await file.readAsBytes();
+
+            final fileMessageJson = {
+              'id': pending.id,
+              'senderId': pending.senderId,
+              'receiverId': pending.receiverId,
+              'groupId': pending.groupId,
+              'fileName': fileName,
+              'fileType': fileType,
+              'fileSize': fileSize,
+              'filePath': filePath,
+              'timestamp': pending.timestamp.toUtc().toIso8601String(),
+            };
+            final startData = {
+              'type': 'FILE_START',
+              'message': fileMessageJson,
+            };
+            socket.write('FILE_TRANSFER:${jsonEncode(startData)}\n');
+            await socket.flush();
+
+            const chunkSize = 32 * 1024;
+            for (int offset = 0; offset < fileBytes.length; offset += chunkSize) {
+              final end = (offset + chunkSize > fileBytes.length) ? fileBytes.length : offset + chunkSize;
+              final chunk = fileBytes.sublist(offset, end);
+              final chunkData = {
+                'type': 'FILE_CHUNK',
+                'messageId': pending.id,
+                'chunk': base64Encode(chunk),
+              };
+              socket.write('FILE_TRANSFER:${jsonEncode(chunkData)}\n');
+              await socket.flush();
+            }
+
+            final endData = {
+              'type': 'FILE_END',
+              'messageId': pending.id,
+            };
+            socket.write('FILE_TRANSFER:${jsonEncode(endData)}\n');
+            await socket.flush();
+
+            await markSent(pending.id);
+            sentCount++;
+            continue;
+          }
+
           final msg = Message(
             id: pending.id,
             senderId: pending.senderId,
@@ -157,7 +215,7 @@ class MessageQueueService {
           socket.write('MSG:${jsonEncode(json)}\n');
           await socket.flush();
 
-          final bool acked = await _waitForAck(pending.id);
+          final bool acked = await waitForAck(pending.id);
 
           if (acked) {
             await markSent(pending.id);
@@ -186,7 +244,7 @@ class MessageQueueService {
     return sentCount;
   }
 
-  Future<bool> _waitForAck(String messageId) async {
+  Future<bool> waitForAck(String messageId) async {
     final completer = Completer<bool>();
     _ackTimers[messageId]?.cancel();
 

@@ -220,15 +220,71 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         final friendId = allFriendIds[index];
         final friend = User(id: friendId, username: _networkService.getUsernameFromDirectory(friendId));
         final isConnected = connectedFriends.any((u) => u.id == friend.id);
-        return ListTile(
-          leading: CircleAvatar(
-            backgroundColor: isConnected ? Colors.teal : Colors.grey,
-            child: Text(friend.username.isNotEmpty ? friend.username.substring(0, 1).toUpperCase() : '?'),
+        final isDoubtful = _networkService.isFriendDoubtful(friend.id);
+
+        Color avatarColor;
+        Color statusDotColor;
+        String statusText;
+
+        if (isDoubtful) {
+          avatarColor = Colors.orange;
+          statusDotColor = Colors.orange;
+          statusText = 'جارٍ التحقق...';
+        } else if (isConnected) {
+          avatarColor = Colors.teal;
+          statusDotColor = Colors.green;
+          statusText = 'متصل';
+        } else {
+          avatarColor = Colors.grey;
+          statusDotColor = Colors.grey.shade400;
+          statusText = 'غير متصل';
+        }
+
+        return Container(
+          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: Theme.of(context).cardColor,
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.04),
+                blurRadius: 4,
+                offset: const Offset(0, 1),
+              ),
+            ],
           ),
-          title: Text(friend.username),
-          subtitle: Text(isConnected ? 'متصل' : 'غير متصل'),
-          trailing: isConnected ? const Icon(Icons.circle, color: Colors.green, size: 14) : null,
-          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(friend: friend))),
+          child: ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            leading: Stack(
+              children: [
+                CircleAvatar(
+                  radius: 24,
+                  backgroundColor: avatarColor,
+                  child: Text(
+                    friend.username.isNotEmpty ? friend.username.substring(0, 1).toUpperCase() : '?',
+                    style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
+                    width: 14,
+                    height: 14,
+                    decoration: BoxDecoration(
+                      color: statusDotColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Theme.of(context).cardColor, width: 2),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            title: Text(friend.username, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+            subtitle: Text(statusText, style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+            trailing: Icon(Iconsax.arrow_left_2, size: 18, color: Colors.grey.shade400),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(friend: friend))),
+          ),
         );
       },
     );
@@ -242,14 +298,34 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       itemCount: userGroups.length,
       itemBuilder: (context, index) {
         final group = userGroups[index];
-        return ListTile(
-          leading: CircleAvatar(
-            backgroundColor: Colors.cyan,
-            child: Text(group.name.isNotEmpty ? group.name.substring(0, 1).toUpperCase() : '?'),
+        return Container(
+          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: Theme.of(context).cardColor,
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.04),
+                blurRadius: 4,
+                offset: const Offset(0, 1),
+              ),
+            ],
           ),
-          title: Text(group.name),
-          subtitle: Text('${group.memberIds.length} أعضاء'),
-          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => GroupChatScreen(group: group))),
+          child: ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            leading: CircleAvatar(
+              radius: 24,
+              backgroundColor: Colors.cyan.shade600,
+              child: Text(
+                group.name.isNotEmpty ? group.name.substring(0, 1).toUpperCase() : '?',
+                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+              ),
+            ),
+            title: Text(group.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+            subtitle: Text('${group.memberIds.length} أعضاء', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+            trailing: Icon(Iconsax.arrow_left_2, size: 18, color: Colors.grey.shade400),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => GroupChatScreen(group: group))),
+          ),
         );
       },
     );
@@ -257,36 +333,45 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Widget _buildDiscoveryTab() {
     final discoveredUsers = _networkService.getDiscoveredUsers();
-    if (discoveredUsers.isEmpty) {
-      return const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Iconsax.wifi, size: 60, color: Colors.grey),
-            SizedBox(height: 16),
-            Text('جاري البحث عن مستخدمين آخرين...'),
-          ],
-        ),
-      );
-    }
-    return ListView.builder(
-      itemCount: discoveredUsers.length,
-      itemBuilder: (context, index) {
-        final user = discoveredUsers[index];
-        return ListTile(
-          leading: CircleAvatar(child: Text(user.username.isNotEmpty ? user.username.substring(0, 1) : '?')),
-          title: Text(user.username),
-          subtitle: const Text('متاح على الشبكة'),
-          trailing: ElevatedButton.icon(
-            icon: const Icon(Iconsax.add),
-            label: const Text('إضافة'),
-            onPressed: () {
-              _networkService.sendConnectionRequest(user);
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم إرسال طلب صداقة إلى ${user.username}')));
-            },
-          ),
-        );
+    return RefreshIndicator(
+      onRefresh: () async {
+        _networkService.triggerRescan();
+        await Future.delayed(const Duration(seconds: 2));
       },
+      child: discoveredUsers.isEmpty
+          ? ListView(
+              children: const [
+                SizedBox(height: 120),
+                Center(
+                  child: Column(
+                    children: [
+                      Icon(Iconsax.wifi, size: 60, color: Colors.grey),
+                      SizedBox(height: 16),
+                      Text('جاري البحث عن مستخدمين آخرين...'),
+                    ],
+                  ),
+                ),
+              ],
+            )
+          : ListView.builder(
+              itemCount: discoveredUsers.length,
+              itemBuilder: (context, index) {
+                final user = discoveredUsers[index];
+                return ListTile(
+                  leading: CircleAvatar(child: Text(user.username.isNotEmpty ? user.username.substring(0, 1) : '?')),
+                  title: Text(user.username),
+                  subtitle: const Text('متاح على الشبكة'),
+                  trailing: ElevatedButton.icon(
+                    icon: const Icon(Iconsax.add),
+                    label: const Text('إضافة'),
+                    onPressed: () {
+                      _networkService.sendConnectionRequest(user);
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم إرسال طلب صداقة إلى ${user.username}')));
+                    },
+                  ),
+                );
+              },
+            ),
     );
   }
   // أضف هذه الدالة داخل كلاس _HomeScreenState

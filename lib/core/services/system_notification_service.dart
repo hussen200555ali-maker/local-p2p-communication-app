@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'log_service.dart';
 
 /// خدمة الإشعارات الحقيقية للنظام
 /// تستخدم flutter_local_notifications لعرض إشعارات في شريط الإشعارات الحقيقي
@@ -26,6 +28,23 @@ class SystemNotificationService {
 
   Future<void> initialize() async {
     if (_initialized) return;
+    if (Platform.isWindows) {
+      _initialized = true;
+      return;
+    }
+    if (Platform.isLinux) {
+      try {
+        const linuxSettings = LinuxInitializationSettings(
+          defaultActionName: 'فتح التطبيق',
+        );
+        const settings = InitializationSettings(linux: linuxSettings);
+        await _plugin.initialize(settings);
+      } catch (e) {
+        LogService.e('Linux notifications init failed: $e');
+      }
+      _initialized = true;
+      return;
+    }
     if (_initCompleter != null) return _initCompleter!.future;
 
     _initCompleter = Completer<void>();
@@ -42,9 +61,9 @@ class SystemNotificationService {
       await _createNotificationChannels();
 
       _initialized = true;
-      debugPrint('SystemNotificationService initialized');
+      LogService.i('SystemNotificationService initialized');
     } catch (e) {
-      debugPrint('SystemNotificationService init error: $e');
+      LogService.e('SystemNotificationService init error: $e');
     } finally {
       _initCompleter!.complete();
       _initCompleter = null;
@@ -63,7 +82,7 @@ class SystemNotificationService {
         await ios?.requestPermissions(alert: true, badge: true, sound: true);
       }
     } catch (e) {
-      debugPrint('requestNotificationPermission error: $e');
+      LogService.e('requestNotificationPermission error: $e');
     }
   }
 
@@ -110,13 +129,13 @@ class SystemNotificationService {
         enableVibration: true,
       ));
     } catch (e) {
-      debugPrint('createNotificationChannels error: $e');
+      LogService.e('createNotificationChannels error: $e');
     }
   }
 
   void _onNotificationTap(NotificationResponse response) {
     final payload = response.payload;
-    debugPrint('System notification tapped: $payload');
+    LogService.d('System notification tapped: $payload');
     onNotificationTap?.call(payload);
   }
 
@@ -126,7 +145,10 @@ class SystemNotificationService {
     String? type,
     String? payload,
   }) async {
+    if (Platform.isWindows) return -1;
     if (!_initialized) await initialize();
+    unawaited(initialize());
+    await Future.microtask(() {});
 
     try {
       final channelId = _getChannelId(type);
@@ -146,7 +168,7 @@ class SystemNotificationService {
       await _plugin.show(id, title, body, details, payload: payload);
       return id;
     } catch (e) {
-      debugPrint('showNotification error: $e');
+      LogService.e('showNotification error: $e');
       return -1;
     }
   }
@@ -191,6 +213,12 @@ class SystemNotificationService {
     }
   }
 
-  Future<void> cancel(int id) => _plugin.cancel(id);
-  Future<void> cancelAll() => _plugin.cancelAll();
+  Future<void> cancel(int id) async {
+    if (Platform.isWindows) return;
+    return _plugin.cancel(id);
+  }
+  Future<void> cancelAll() async {
+    if (Platform.isWindows) return;
+    return _plugin.cancelAll();
+  }
 }

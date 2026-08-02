@@ -32,7 +32,6 @@ class CallIntegration {
   Future<void> startCall(BuildContext context, User friend, CallType callType) async {
     if (!context.mounted) return;
     await initialize();
-    await _callManager.startCall(friend.id, callType);
     if (!context.mounted) return;
     Navigator.push(
       context,
@@ -151,6 +150,18 @@ class CallIntegration {
   Future<bool> canStartCall(BuildContext context, String userId) async {
     final networkService = LocalNetworkService();
     final isConnected = networkService.getConnectedFriends().any((u) => u.id == userId);
+
+    if (networkService.isFriendDoubtful(userId)) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('جارٍ التحقق من الاتصال. يرجى الانتظار...'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return false;
+    }
 
     if (!isConnected && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(

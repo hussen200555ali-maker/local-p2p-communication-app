@@ -30,17 +30,13 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   final CallManager _callManager = CallManager();
   StreamSubscription? _callStateSubscription;
 
-  late AnimationController _fadeController;
   late AnimationController _scaleController;
   late AnimationController _slideController;
-
-  late Animation<double> _fadeAnimation;
-  late Animation<double> _scaleAnimation;
-  late Animation<Offset> _slideAnimation;
 
   bool _isMuted = false;
   bool _isCameraOff = false;
   bool _isSpeakerOn = true;
+  bool _isEnding = false;
   CallModel? _currentCall;
   Timer? _callDurationTimer;
   int _callDuration = 0;
@@ -77,55 +73,25 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   }
 
   void _setupAnimations() {
-    _fadeController = AnimationController(
-      duration: const Duration(milliseconds: 600),
-      vsync: this,
-    );
-    _fadeAnimation = Tween<double>(
-      begin: 0.0,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _fadeController,
-      curve: Curves.easeIn,
-    ));
-
     _scaleController = AnimationController(
       duration: const Duration(milliseconds: 800),
       vsync: this,
     );
-    _scaleAnimation = Tween<double>(
-      begin: 0.8,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _scaleController,
-      curve: Curves.elasticOut,
-    ));
 
     _slideController = AnimationController(
       duration: const Duration(milliseconds: 600),
       vsync: this,
     );
-    _slideAnimation = Tween<Offset>(
-      begin: const Offset(0, 0.3),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _slideController,
-      curve: Curves.easeOutCubic,
-    ));
   }
 
   void _startAnimations() {
-    _fadeController.forward();
-    Future.delayed(const Duration(milliseconds: 200), () {
-      _scaleController.forward();
-    });
+    _scaleController.forward();
     Future.delayed(const Duration(milliseconds: 600), () {
       _slideController.forward();
     });
   }
 
   void _stopAnimations() {
-    _fadeController.stop();
     _scaleController.stop();
     _slideController.stop();
   }
@@ -133,14 +99,10 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   @override
   void dispose() {
     _stopAnimations();
-    _fadeController.dispose();
     _scaleController.dispose();
     _slideController.dispose();
     _callStateSubscription?.cancel();
     _callDurationTimer?.cancel();
-    if (_currentCall != null && _currentCall!.status == CallStatus.active) {
-      _callManager.endCall(_currentCall!.id);
-    }
     super.dispose();
   }
 
@@ -156,8 +118,14 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   }
 
   void _handleHangUp() {
+    if (_isEnding) return;
+    _isEnding = true;
     if (mounted) {
-      Navigator.of(context).pop();
+      try {
+        Navigator.of(context).pop();
+      } catch (e) {
+        debugPrint('_handleHangUp error: $e');
+      }
     }
   }
 
@@ -183,9 +151,7 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
     if (_currentCall != null) {
       _callManager.endCall(_currentCall!.id);
     }
-    if (mounted) {
-      Navigator.of(context).pop();
-    }
+    _handleHangUp();
   }
 
   String _formatDuration(int seconds) {
@@ -278,13 +244,20 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
           backgroundColor: Colors.red,
           iconSize: 32,
         ),
-        if (widget.callType == CallType.video)
+        if (widget.callType == CallType.video) ...[
           _buildControlButton(
             icon: _isCameraOff ? Iconsax.video_slash : Iconsax.video,
             onPressed: _toggleCamera,
             color: _isCameraOff ? Colors.white : Colors.blue,
             backgroundColor: _isCameraOff ? Colors.red : Colors.white24,
           ),
+          _buildControlButton(
+            icon: Iconsax.repeat,
+            onPressed: () => _callManager.switchCamera(),
+            color: Colors.white,
+            backgroundColor: Colors.white24,
+          ),
+        ],
         _buildControlButton(
           icon: _isSpeakerOn ? Iconsax.volume_high : Iconsax.volume_slash,
           onPressed: _toggleSpeaker,

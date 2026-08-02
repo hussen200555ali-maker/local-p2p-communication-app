@@ -13,6 +13,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     CreateAndAttachConsole();
   }
 
+  // Single-instance mutex: prevent multiple processes and bring existing window to front
+  HANDLE mutex = ::CreateMutexW(nullptr, TRUE, L"Local\\Alshami_SingleInstance_{550E8400-E29B-41D4-A716-446655440000}");
+  if (::GetLastError() == ERROR_ALREADY_EXISTS) {
+    ::CloseHandle(mutex);
+    HWND existing = ::FindWindowW(L"FLUTTER_RUNNER_WIN32_WINDOW", L"Alshami");
+    if (existing) {
+      ::SetForegroundWindow(existing);
+      ::ShowWindow(existing, SW_SHOWNORMAL);
+    }
+    return EXIT_SUCCESS;
+  }
+
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -27,7 +39,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"local_social_app", origin, size)) {
+  if (!window.Create(L"Alshami", origin, size)) {
+    ::ReleaseMutex(mutex);
+    ::CloseHandle(mutex);
+    ::CoUninitialize();
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
@@ -38,6 +53,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
+  ::ReleaseMutex(mutex);
+  ::CloseHandle(mutex);
   ::CoUninitialize();
   return EXIT_SUCCESS;
 }

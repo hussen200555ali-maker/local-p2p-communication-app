@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:iconsax/iconsax.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../core/services/local_network_service.dart';
 import '../../chat/screens/home_screen.dart';
 import 'login_screen.dart';
 
@@ -21,19 +23,26 @@ class _SplashScreenState extends State<SplashScreen> {
 
 
   Future<void> _navigate() async {
-    await Permission.location.request();
-    await Future.delayed(const Duration(seconds: 1));
+    if (!Platform.isWindows && !Platform.isLinux) {
+      final status = await Permission.location.request();
+      if (status.isGranted) {
+        LocalNetworkService().triggerAnnouncementNow();
+      }
+    }
 
     if (!mounted) return;
 
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool('isLoggedIn_v3') ?? false) {
-      // **الإصلاح**: نحتاج إلى إنشاء المستخدم وبدء الخدمة هنا
       final userId = prefs.getString('user_uuid');
       final username = prefs.getString('username');
 
       if (userId != null && username != null) {
-        // الخدمة بدأت بالفعل من main.dart - لا داعي لتكرار البدء
+        await Future.wait([
+          _waitForService(),
+          Future.delayed(const Duration(seconds: 5)),
+        ]);
+
         if (mounted) {
           Navigator.pushReplacement(
             context,
@@ -41,17 +50,27 @@ class _SplashScreenState extends State<SplashScreen> {
           );
         }
       } else {
-        // إذا كانت البيانات غير كاملة، اذهب لتسجيل الدخول
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => const LoginScreen()),
+          );
+        }
+      }
+    } else {
+      if (mounted) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (context) => const LoginScreen()),
         );
       }
-    } else {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const LoginScreen()),
-      );
+    }
+  }
+
+  Future<void> _waitForService() async {
+    while (mounted) {
+      if (LocalNetworkService().isRunning) return;
+      await Future.delayed(const Duration(milliseconds: 100));
     }
   }
 

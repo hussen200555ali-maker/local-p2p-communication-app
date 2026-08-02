@@ -1,6 +1,11 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:iconsax/iconsax.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../../core/services/local_network_service.dart';
+import '../../../core/services/log_service.dart';
+import '../../diagnostics/screens/diagnostic_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -34,6 +39,85 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setBool(key, value);
   }
 
+  Future<void> _exportLogs() async {
+    final logPath = LogService().getTodayLogPath();
+    if (logPath == null) {
+      _showSnack('لا يوجد ملف سجل اليوم');
+      return;
+    }
+
+    if (Platform.isWindows) {
+      await Clipboard.setData(ClipboardData(text: logPath));
+      try {
+        await Process.run('explorer', ['/select,', logPath]);
+      } catch (_) {
+        _showSnack('تم نسخ المسار: $logPath');
+      }
+      return;
+    }
+
+    try {
+      final file = File(logPath);
+      if (!file.existsSync()) {
+        _showSnack('ملف السجل غير موجود');
+        return;
+      }
+      final content = await file.readAsString();
+      if (mounted) _showLogDialog(content);
+    } catch (e) {
+      _showSnack('فشل قراءة السجل: $e');
+    }
+  }
+
+  void _showLogDialog(String content) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.ltr,
+        child: Dialog(
+          insetPadding: const EdgeInsets.all(8),
+          child: Column(
+            children: [
+              AppBar(
+                title: const Text('السجل', style: TextStyle(fontSize: 16)),
+                leading: IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.pop(ctx),
+                ),
+                actions: [
+                  IconButton(
+                    icon: const Icon(Icons.copy),
+                    tooltip: 'نسخ الكل',
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: content));
+                      Navigator.pop(ctx);
+                      _showSnack('تم نسخ السجل بالكامل');
+                    },
+                  ),
+                ],
+              ),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(12),
+                  child: SelectableText(
+                    content,
+                    style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showSnack(String msg) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -49,6 +133,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (value) {
               setState(() => _isDarkMode = value);
               _saveSetting('dark_mode', value);
+              LocalNetworkService().darkModeNotifier.value = value;
             },
           ),
           const Divider(),
@@ -73,6 +158,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _saveSetting('read_receipts', value);
             },
           ),
+          if (Platform.isLinux)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.shade200),
+                ),
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '⚠️ تحذير أمني',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.orange,
+                      ),
+                    ),
+                    SizedBox(height: 4),
+                    Text(
+                      'هذا التطبيق مخصص للتواصل الخاص على شبكة محلية موثوقة. الشبكات العامة أو المعادية قد تعرض اتصالاتك للخطر.',
+                      style: TextStyle(fontSize: 12, color: Colors.black87),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          const Divider(),
+          const _SectionHeader(title: 'التشخيص'),
+          ListTile(
+            leading: const Icon(Iconsax.activity),
+            title: const Text('تشخيص الشبكة'),
+            subtitle: const Text('عرض حالة IP والمنافذ وسجل الاكتشاف'),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DiagnosticScreen())),
+          ),
+          ListTile(
+            leading: const Icon(Iconsax.document_download),
+            title: const Text('تصدير السجلات'),
+            subtitle: const Text('إرسال ملف السجل للتشخيص'),
+            onTap: _exportLogs,
+          ),
           const Divider(),
           const _SectionHeader(title: 'حول'),
           ListTile(
@@ -83,7 +211,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ListTile(
             leading: const Icon(Iconsax.code),
             title: const Text('المطور'),
-            subtitle: const Text('Local Social App Team'),
+            subtitle: const Text('فريق الشامي'),
           ),
         ],
       ),
