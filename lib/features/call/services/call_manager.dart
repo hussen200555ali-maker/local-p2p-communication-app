@@ -49,11 +49,7 @@ class CallManager {
   Timer? _callDurationTimer;
 
   final Map<String, dynamic> _configuration = {
-    'iceServers': [
-      {'urls': 'stun:stun.l.google.com:19302'},
-      {'urls': 'stun:stun1.l.google.com:19302'},
-      {'urls': 'stun:stun2.l.google.com:19302'},
-    ]
+    'iceServers': <Map<String, dynamic>>[],
   };
 
   // تهيئة مدير المكالمات
@@ -171,8 +167,20 @@ class CallManager {
       await _peerConnection!.setLocalDescription(offer);
 
       await _networkService.startCall(receiverId, callType);
+      CallModel? activeCall;
+      for (final c in _networkService.getActiveCalls()) {
+        if (c.receiverId == receiverId && (c.status == CallStatus.ringing || c.status == CallStatus.active)) {
+          activeCall = c;
+          break;
+        }
+      }
+      if (activeCall == null) {
+        debugPrint('startCall: no active call found for $receiverId');
+        _cleanupCall();
+        return;
+      }
       _networkService.sendWebRTCSignal(
-        _networkService.getActiveCalls().first.id,
+        activeCall.id,
         receiverId,
         {'type': 'offer', 'sdp': offer.sdp},
       );

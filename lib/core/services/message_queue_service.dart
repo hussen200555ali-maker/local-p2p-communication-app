@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../features/chat/models/message_model.dart';
 import '../../features/chat/models/pending_message_model.dart';
 import 'database_service.dart';
+import 'log_service.dart';
 
 class MessageQueueService {
   static final MessageQueueService _instance = MessageQueueService._internal();
@@ -159,6 +160,7 @@ class MessageQueueService {
             }
 
             final fileBytes = await file.readAsBytes();
+            LogService.i('DEBUG flushQueue: sending FILE msgId=${pending.id} bytes=${fileBytes.length} to $peerId');
 
             final fileMessageJson = {
               'id': pending.id,
@@ -198,8 +200,19 @@ class MessageQueueService {
             socket.write('FILE_TRANSFER:${jsonEncode(endData)}\n');
             await socket.flush();
 
-            await markSent(pending.id);
-            sentCount++;
+            final bool acked = await waitForAck(pending.id);
+
+            if (acked) {
+              await markSent(pending.id);
+              sentCount++;
+            } else {
+              if (pending.retryCount + 1 >= 3) {
+                await markFailed(pending.id);
+              } else {
+                await _dbService.updatePendingStatus(pending.id, DeliveryStatus.pending);
+                await updateRetry(pending.id, pending.retryCount + 1);
+              }
+            }
             continue;
           }
 

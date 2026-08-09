@@ -47,6 +47,7 @@ class LocalNetworkService {
   Timer? _announcementTimer;
   Timer? _reconnectTimer;
   Timer? _heartbeatTimer;
+  Timer? _statusCheckTimer;
 
   // --- Data Directories & State ---
   final Map<String, String> _ipDirectory = {};
@@ -74,9 +75,13 @@ class LocalNetworkService {
   final Map<String, Completer<bool>> _pingCompleters = {};
   final Set<String> _callProtectedSockets = {};
   final Map<String, DateTime> _lastDiscoverReconnect = {};
+  final Map<String, Timer> _pendingOldSocketClosers = {};
+  final Map<Socket, DateTime> _socketLastActivity = {};
 
   // --- File Transfer State ---
   final Map<String, _FileTransferState> _incomingFileTransfers = {};
+  final Map<String, List<List<int>>> _pendingFileChunks = {};
+  final Map<String, bool> _pendingFileEnds = {};
 
   // --- Settings ---
   bool _showOnlineStatus = true;
@@ -117,7 +122,7 @@ class LocalNetworkService {
   Function(String, String)? onGroupMessageDeleted;
 
   // --- Call Callbacks ---
-  Function(CallModel)? onIncomingCall;
+  final Set<Function(CallModel)> _incomingCallListeners = {};
   Function(CallModel)? onCallStatusChanged;
   Function(String)? onCallEnded;
   Function(String, Map<String, dynamic>)? onCallSignalReceived;
@@ -189,7 +194,7 @@ class LocalNetworkService {
     if (_isServiceRunning) return;
     _isServiceRunning = true;
     LogService.i('بدء الخدمة');
-    LogService.i("🚀 Starting LocalNetworkService...");
+    LogService.i("🚀 Starting LocalNetworkService v7.1 (Event-Driven)...");
     await EncryptionService().init();
     _currentUser = user;
     await _loadDataFromStorage();
@@ -198,31 +203,41 @@ class LocalNetworkService {
     await _startDiscoveryListener();
     await _initSendSockets();
     await _startMainServer();
-    _startAnnouncing();
+
+    // === النظام الجديد (v7.1) ===
+    // 1. إرسال 3 إعلانات USER_ONLINE عند الدخول
+    await _sendInitialOnlineAnnouncement();
+
+    // 2. بدء Keep-Alive (كل 60 ثانية)
     _startReconnectScheduler();
     _startHeartbeatSystem();
-    updateUserStatus(true);
 
-    // فوراً بمحاولة إعادة الاتصال بجميع الأصدقاء عند بدء التشغيل
-    _reconnectToAllFriends();
-
-    // مسح TCP للشبكة المحلية لاكتشاف الأجهزة
+    // 3. مسح TCP لاكتشاف الأجهزة (مرة واحدة عند التشغيل)
     _scanSubnets();
 
     final statusEmoji = (_broadcastSocket != null && _serverSocket != null) ? "✅" : "⚠️";
-    LogService.i('الخدمة بدأت: UDP=${_broadcastSocket != null}, Sends=${_sendSockets.length}, TCP=${_serverSocket != null}');
-    LogService.i("$statusEmoji LocalNetworkService started (recv=${_broadcastSocket != null}, send=${_sendSockets.length}, tcp=${_serverSocket != null})");
+    LogService.i('الخدمة بدأت (v7.1): UDP=${_broadcastSocket != null}, Sends=${_sendSockets.length}, TCP=${_serverSocket != null}');
+    LogService.i("$statusEmoji LocalNetworkService v7.1 started (recv=${_broadcastSocket != null}, send=${_sendSockets.length}, tcp=${_serverSocket != null})");
   }
 
   Future<void> stop() async {
     if (!_isServiceRunning) return;
     _isServiceRunning = false;
     LogService.i("🛑 Stopping LocalNetworkService...");
+
+    // إرسال USER_OFFLINE قبل الإغلاق
+    await _sendOfflineAnnouncement();
+
     _announcementTimer?.cancel();
     _reconnectTimer?.cancel();
     _heartbeatTimer?.cancel();
+    _statusCheckTimer?.cancel();
     _callHeartbeatTimer?.cancel();
     _callSignalDrainTimer?.cancel();
+    for (final timer in _typingTimers.values) {
+      timer.cancel();
+    }
+    _typingTimers.clear();
     _broadcastSocket?.close();
     for (final s in _sendSockets) { s.close(); }
     _sendSockets.clear();
@@ -236,7 +251,10 @@ class LocalNetworkService {
     _callSockets.clear();
     _callLastPongTime.clear();
     _callPingCompleters.clear();
-    if (_currentUser != null) updateUserStatus(false);
+    for (final timer in _pendingOldSocketClosers.values) {
+      timer.cancel();
+    }
+    _pendingOldSocketClosers.clear();
     onFriendsChanged?.call();
     LogService.i("🗑️ LocalNetworkService stopped.");
   }
@@ -276,7 +294,7 @@ class LocalNetworkService {
     if (onMessageEdited != null) this.onMessageEdited = onMessageEdited;
     if (onGroupMessageEdited != null) this.onGroupMessageEdited = onGroupMessageEdited;
     if (onGroupMessageDeleted != null) this.onGroupMessageDeleted = onGroupMessageDeleted;
-    if (onIncomingCall != null) this.onIncomingCall = onIncomingCall;
+    if (onIncomingCall != null) _incomingCallListeners.add(onIncomingCall);
     if (onCallStatusChanged != null) this.onCallStatusChanged = onCallStatusChanged;
     if (onCallEnded != null) this.onCallEnded = onCallEnded;
     if (onCallSignalReceived != null) {
@@ -308,10 +326,8 @@ class LocalNetworkService {
     onGroupMessageDeleted = null;
     
     // --- Call Callbacks Unregistration ---
-    onIncomingCall = null;
-    onCallStatusChanged = null;
-    onCallEnded = null;
-    onCallSignalReceived = null;
+    // Call callbacks are owned permanently by CallManager and are intentionally NOT cleared here,
+    // otherwise a UI screen's dispose() would break call handling for the app lifetime.
 
     // --- Queue Callbacks ---
     onMessageDeliveryStatusChanged = null;
@@ -525,26 +541,73 @@ class LocalNetworkService {
     }
   }
 
-  Future<void> _performAnnouncement() async {
+  // --- Event-Driven Discovery System (v7.1) ---
+  // تم إلغاء البث الدوري كل 10 ثوانٍ واستبداله بنظام قائم على الأحداث
+
+  /// إرسال إعلان USER_ONLINE عند دخول المستخدم للتطبيق
+  /// يُرسل 3 إعلانات مع 500ms بين كل واحدة لضمان الوصول
+  Future<void> _sendInitialOnlineAnnouncement() async {
+    if (_currentUser == null) return;
+    for (int i = 0; i < 3; i++) {
+      await _broadcastOnlineStatus();
+      if (i < 2) await Future.delayed(const Duration(milliseconds: 500));
+    }
+    LogService.i('📡 تم إرسال 3 إعلانات USER_ONLINE عند بدء التشغيل');
+  }
+
+  /// إرسال إعلان USER_OFFLINE عند خروج المستخدم
+  Future<void> _sendOfflineAnnouncement() async {
+    if (_currentUser == null) return;
+    final currentIp = await getWifiIP();
+    if (currentIp == null) return;
+
+    final announcement = {
+      'type': 'USER_OFFLINE',
+      'userId': _currentUser!.id,
+    };
+    final payload = utf8.encode('DISCOVER:${jsonEncode(announcement)}');
+    _sendDiscoveryPacket(payload, currentIp);
+    LogService.i('📡 تم إرسال USER_OFFLINE عند إيقاف الخدمة');
+  }
+
+  /// إرسال إعلان USER_ONLINE (لل.keep-alen والتحديث اليدوي)
+  Future<void> _broadcastOnlineStatus() async {
     if (_currentUser == null) return;
     final currentIp = await getWifiIP();
     if (currentIp == null) {
-      LogService.i('⚠️ DISCOVER: IP=null');
-      LogService.w('⚠️ _performAnnouncement: IP=null');
+      LogService.w('⚠️ _broadcastOnlineStatus: IP=null');
       return;
     }
-    LogService.i('إرسال DISCOVER: IP=$currentIp');
-    LogService.i('📡 _performAnnouncement: IP=$currentIp, sendSockets=${_sendSockets.length}');
-    final announcement = {'id': _currentUser!.id, 'username': _currentUser!.username, 'ip': currentIp};
+
+    final announcement = {
+      'type': 'USER_ONLINE',
+      'userId': _currentUser!.id,
+      'username': _currentUser!.username,
+      'ip': currentIp,
+      'port': 8080,
+    };
     final payload = utf8.encode('DISCOVER:${jsonEncode(announcement)}');
     _sendDiscoveryPacket(payload, currentIp);
   }
 
-  void _startAnnouncing() {
-    _announcementTimer?.cancel();
-    _announcementTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
-      await _performAnnouncement();
-    });
+  /// إرسال DISCOVER_REQUEST يدوياً (عند ضغط زر التحديث)
+  Future<void> sendDiscoverRequest() async {
+    if (_currentUser == null) return;
+    final currentIp = await getWifiIP();
+    if (currentIp == null) return;
+
+    final announcement = {
+      'type': 'DISCOVER_REQUEST',
+      'userId': _currentUser!.id,
+    };
+    final payload = utf8.encode('DISCOVER:${jsonEncode(announcement)}');
+    _sendDiscoveryPacket(payload, currentIp);
+    LogService.i('📡 تم إرسال DISCOVER_REQUEST يدوياً');
+  }
+
+  /// Legacy: للتوافق مع الكود القديم - يُحول إلى USER_ONLINE
+  Future<void> _performAnnouncement() async {
+    await _broadcastOnlineStatus();
   }
 
   void _startReconnectScheduler() {
@@ -569,45 +632,153 @@ class LocalNetworkService {
 
   void _startHeartbeatSystem() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      final pingData = utf8.encode('PING:${_currentUser?.id ?? "unknown"}\n');
-      for (final socket in _sendSockets) {
-        try {
-          socket.send(pingData, InternetAddress("255.255.255.255"), 8081);
-        } catch (e) {
-          LogService.w('Heartbeat PING(${socket.address}): $e');
-        }
-      }
-      if (_sendSockets.isEmpty) {
-        try {
-          _broadcastSocket?.send(pingData, InternetAddress("255.255.255.255"), 8081);
-        } catch (e) {
-          LogService.w('Heartbeat PING(broadcast): $e');
-        }
-      }
-      final now = DateTime.now();
-      final staleThreshold = const Duration(seconds: 15);
-      for (final entry in _userSockets.entries) {
-        final socket = entry.value;
-        final userId = entry.key;
-        try {
-          socket.write('PING\n');
-        } catch (_) {
-        }
-        final lastPong = _lastPongTime[userId];
-        if (lastPong != null && now.difference(lastPong) > staleThreshold) {
-          if (!_callProtectedSockets.contains(userId)) {
-            LogService.w("No PONG from $userId for >15s, removing socket");
-            _removeSocket(socket);
-          }
-        }
-      }
+
+    // === نظام الكشف الجديد (v7.1) ===
+    // Keep-Alive: إرسال USER_ONLINE كل 60 ثانية بدلاً من PING كل 5 ثوانٍ
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 60), (timer) async {
+      // إرسال USER_ONLINE كنبض تأكيد
+      await _broadcastOnlineStatus();
     });
+
+    // فحص حالة الأصدقاء كل 5 ثوانٍ (مهلة 70 ثانية)
+    _statusCheckTimer?.cancel();
+    _statusCheckTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      unawaited(_checkFriendStatuses());
+    });
+
+    // TCP PING/PONG كل 20 ثانية (للحفاظ على اتصالات TCP حية)
+    _startTcpPingPong();
+
     _startCallHeartbeat();
     _callSignalDrainTimer?.cancel();
     _callSignalDrainTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
       _drainAllPendingCallSignals();
     });
+  }
+
+  /// فحص حالة الأصدقاء وتحديث حالاتهم (كل 5 ثوانٍ)
+  Future<void> _checkFriendStatuses() async {
+    final now = DateTime.now();
+    const offlineTimeout = Duration(seconds: 70); // 60s Keep-Alive + 10s buffer
+
+    for (final friendId in _friendIds) {
+      final lastPong = _lastPongTime[friendId];
+      final hasConnection = _userSockets.containsKey(friendId);
+
+      if (hasConnection) {
+        // هناك اتصال TCP - تحقق من PONG
+        if (lastPong != null && now.difference(lastPong) > offlineTimeout) {
+          // انتهت مهلة Keep-Alive - تحقق حيوية أولاً قبل القطع المدمر
+          final socket = _userSockets[friendId];
+          final alive = socket != null && await _pingAndVerify(friendId, socket);
+          if (alive) {
+            LogService.w('DEBUG _checkFriendStatuses: $friendId looked stale but PING/PONG verified ALIVE - no cut');
+            _lastPongTime[friendId] = DateTime.now();
+            _updateFriendStatus(friendId, true);
+          } else {
+            LogService.w('DEBUG _checkFriendStatuses: $friendId stale AND PING/PONG failed - offline + reconnect');
+            _updateFriendStatus(friendId, false);
+            _quickReconnect(friendId);
+          }
+        } else {
+          // نشط
+          _updateFriendStatus(friendId, true);
+        }
+      } else {
+        // لا يوجد اتصال TCP
+        if (lastPong != null && now.difference(lastPong) > offlineTimeout) {
+          // انتهت المهلة - offline + محاولة إعادة اتصال
+          _updateFriendStatus(friendId, false);
+          _quickReconnect(friendId);
+        } else if (lastPong != null) {
+          // هناك آخر PONG لكن لا يوجد اتصال - جارٍ التحقق
+          final currentStatus = _userStatuses[friendId];
+          if (currentStatus == null || currentStatus.isOnline) {
+            _userStatuses[friendId] = UserStatus(
+              userId: friendId,
+              isOnline: false,
+              lastSeen: DateTime.now(),
+            );
+            onStatusChanged?.call();
+          }
+        }
+      }
+    }
+  }
+
+  Future<bool> _pingAndVerify(String userId, Socket socket) async {
+    _pingCompleters[userId] = Completer<bool>();
+    if (!_safeWrite(socket, 'PING\n')) {
+      _pingCompleters.remove(userId);
+      return false;
+    }
+    final ok = await _pingCompleters[userId]!.future.timeout(
+      const Duration(milliseconds: 500),
+      onTimeout: () => false,
+    );
+    _pingCompleters.remove(userId);
+    return ok;
+  }
+
+  /// تحديث حالة صديق معين
+  void _updateFriendStatus(String friendId, bool isOnline) {
+    final currentStatus = _userStatuses[friendId];
+    if (currentStatus != null && currentStatus.isOnline == isOnline) return;
+
+    _userStatuses[friendId] = UserStatus(
+      userId: friendId,
+      isOnline: isOnline,
+      lastSeen: isOnline ? null : DateTime.now(),
+    );
+    onStatusChanged?.call();
+  }
+
+  /// TCP PING/PONG كل 20 ثانية للحفاظ على الاتصالات حية
+  void _startTcpPingPong() {
+    Timer.periodic(const Duration(seconds: 20), (timer) {
+      final now = DateTime.now();
+      final staleThreshold = const Duration(seconds: 25); // أكثر من 25 ثانية بدون PONG
+
+      for (final entry in _userSockets.entries) {
+        final socket = entry.value;
+        final userId = entry.key;
+        final lastActivity = _socketLastActivity[socket];
+
+        // إرسال PING عبر TCP
+        try {
+          socket.write('PING\n');
+        } catch (_) {}
+
+        // فحص آخر PONG
+        final lastPong = _lastPongTime[userId];
+        LogService.i(
+            'DEBUG heartbeat: PING sent to $userId (lastPongAge=${lastPong == null ? "none" : now.difference(lastPong).inSeconds}s, socketActive=${lastActivity == null ? "no-activity" : "active-${now.difference(lastActivity).inSeconds}s"})');
+        if (lastPong != null && now.difference(lastPong) > staleThreshold) {
+          if (!_callProtectedSockets.contains(userId)) {
+            LogService.w("TCP PONG timeout from $userId (>25s), removing socket");
+            _removeSocket(socket);
+            _handleFriendDisconnected(userId);
+          }
+        }
+      }
+    });
+  }
+
+  /// معالجة انقطاع صديق (بدون إرسال UDP)
+  void _handleFriendDisconnected(String friendId) {
+    // وضع حالة "جارٍ التحقق"
+    _userStatuses[friendId] = UserStatus(
+      userId: friendId,
+      isOnline: false,
+      lastSeen: DateTime.now(),
+    );
+    onStatusChanged?.call();
+
+    // محاولة إعادة اتصال TCP مباشرة (بدون UDP)
+    if (_ipDirectory.containsKey(friendId)) {
+      LogService.i('🔄 محاولة إعادة اتصال TCP مع $friendId بعد الانقطاع');
+      _improvedReconnectToFriend(friendId);
+    }
   }
 
   void _startCallHeartbeat() {
@@ -650,9 +821,40 @@ class LocalNetworkService {
     }
   }
 
-  // --- Message Handlers ---
+  // --- Message Handlers (v7.1 - Event-Driven) ---
   void _handleDiscoveryMessage(String message) {
     final trimmed = message.trim();
+
+    // === البروتوكول الجديد (v7.1) ===
+    if (trimmed.startsWith('DISCOVER:')) {
+      try {
+        final data = jsonDecode(message.substring(9));
+        final String messageType = data['type'] ?? 'LEGACY';
+
+        switch (messageType) {
+          case 'USER_ONLINE':
+            _handleUserOnline(data);
+            break;
+          case 'USER_OFFLINE':
+            _handleUserOffline(data);
+            break;
+          case 'DISCOVER_REQUEST':
+            _handleDiscoverRequest(data);
+            break;
+          case 'LEGACY':
+            // للتوافق مع الإصدارات القديمة
+            _handleLegacyDiscover(data);
+            break;
+          default:
+            LogService.w('⚠️ نوع رسالة غير معروف: $messageType');
+        }
+      } catch (e) {
+        LogService.i('خطأ في DISCOVER: $e');
+      }
+      return;
+    }
+
+    // === بروتوكولات قديمة (للتوافق) ===
     if (trimmed.startsWith('PING:')) {
       final userId = trimmed.substring(5);
       if (userId == _currentUser?.id) return;
@@ -682,38 +884,106 @@ class LocalNetworkService {
       } catch (e) { /* Ignore malformed status */ }
       return;
     }
-    if (!message.startsWith('DISCOVER:')) return;
-    try {
-      final data = jsonDecode(message.substring(9));
-      final String id = data['id'];
-      if (id == _currentUser?.id) {
-        LogService.i('استقبلت DISCOVER من نفسي (مهمت)');
-        return;
+  }
+
+  /// معالجة رسالة USER_ONLINE
+  void _handleUserOnline(Map<String, dynamic> data) {
+    final String userId = data['userId'];
+    final String? username = data['username'];
+    final String? ip = data['ip'];
+    final int? port = data['port'];
+
+    if (userId == _currentUser?.id) return;
+
+    LogService.i('🟢 USER_ONLINE: ${username ?? userId} من ${ip ?? "unknown"}');
+
+    // تحديث دليل المستخدمين
+    if (ip != null) _ipDirectory[userId] = ip;
+    if (username != null && _userDirectory[userId] != username) {
+      _userDirectory[userId] = username;
+      _saveFriendsAndDirectory();
+    }
+
+    // تحديث الحالة إلى متصل
+    _updateFriendStatus(userId, true);
+
+    // إذا كان صديقاً وليس لديه اتصال TCP، حاول الاتصال
+    if (_friendIds.contains(userId) && !_userSockets.containsKey(userId) && !_callProtectedSockets.contains(userId)) {
+      LogService.i('🔄 محاولة اتصال TCP مع صديق $username بعد USER_ONLINE');
+      _improvedReconnectToFriend(userId);
+    }
+
+    // إضافة إلى قائمة المكتشفين إذا لم يكن صديقاً
+    if (!_friendIds.contains(userId) && !_discoveredUsers.any((u) => u.id == userId)) {
+      _discoveredUsers.add(User(id: userId, username: username ?? '...'));
+      LogService.i('مستخدم مكتشف: $username');
+      onDiscoveryChanged?.call();
+    }
+  }
+
+  /// معالجة رسالة USER_OFFLINE
+  void _handleUserOffline(Map<String, dynamic> data) {
+    final String userId = data['userId'];
+
+    if (userId == _currentUser?.id) return;
+
+    LogService.i('🔴 USER_OFFLINE: ${_userDirectory[userId] ?? userId}');
+
+    // تحديث الحالة إلى غير متصل
+    _userStatuses[userId] = UserStatus(
+      userId: userId,
+      isOnline: false,
+      lastSeen: DateTime.now(),
+    );
+    onStatusChanged?.call();
+
+    // إغلاق اتصال TCP مع هذا المستخدم
+    final socket = _userSockets[userId];
+    if (socket != null) {
+      _removeSocket(socket);
+    }
+  }
+
+  /// معالجة رسالة DISCOVER_REQUEST
+  void _handleDiscoverRequest(Map<String, dynamic> data) {
+    final String requesterId = data['userId'];
+
+    if (requesterId == _currentUser?.id) return;
+
+    LogService.i('🔍 DISCOVER_REQUEST من ${_userDirectory[requesterId] ?? requesterId}');
+
+    // الرد فوراً بـ USER_ONLINE
+    _broadcastOnlineStatus();
+  }
+
+  /// للتوافق مع الإصدارات القديمة
+  void _handleLegacyDiscover(Map<String, dynamic> data) {
+    final String id = data['id'];
+    if (id == _currentUser?.id) return;
+
+    final String? ip = data['ip'] != null ? _convertArabicNumbers(data['ip']) : null;
+    final String? username = data['username'];
+
+    if (ip != null) _ipDirectory[id] = ip;
+    if (username != null && _userDirectory[id] != username) {
+      _userDirectory[id] = username;
+      _saveFriendsAndDirectory();
+    }
+
+    if (_friendIds.contains(id) && !_userSockets.containsKey(id) && !_callProtectedSockets.contains(id) && _shouldAttemptReconnect(id)) {
+      final lastDiscover = _lastDiscoverReconnect[id];
+      final cooldownOk = lastDiscover == null || DateTime.now().difference(lastDiscover).inSeconds >= 8;
+      if (cooldownOk) {
+        _lastDiscoverReconnect[id] = DateTime.now();
+        LogService.i('محاولة إعادة اتصال بصديق $username (Legacy)');
+        _improvedReconnectToFriend(id);
       }
-      final String ip = _convertArabicNumbers(data['ip']);
-      final String username = data['username'];
-      LogService.i('DISCOVER ورد: $username من $ip');
-      _ipDirectory[id] = ip;
-      if (_userDirectory[id] != username) {
-        _userDirectory[id] = username;
-        _saveFriendsAndDirectory();
-      }
-      if (_friendIds.contains(id) && !_userSockets.containsKey(id) && !_callProtectedSockets.contains(id) && _shouldAttemptReconnect(id)) {
-        final lastDiscover = _lastDiscoverReconnect[id];
-        final cooldownOk = lastDiscover == null || DateTime.now().difference(lastDiscover).inSeconds >= 8;
-        if (cooldownOk) {
-          _lastDiscoverReconnect[id] = DateTime.now();
-          LogService.i('محاولة إعادة اتصال بصديق $username');
-          _improvedReconnectToFriend(id);
-        }
-      }
-      if (!_friendIds.contains(id) && !_discoveredUsers.any((u) => u.id == id)) {
-        _discoveredUsers.add(User(id: id, username: username));
-        LogService.i('مستخدم مكتشف: $username');
-        onDiscoveryChanged?.call();
-      }
-    } catch (e) {
-      LogService.i('خطأ في DISCOVER: $e');
+    }
+
+    if (!_friendIds.contains(id) && !_discoveredUsers.any((u) => u.id == id)) {
+      _discoveredUsers.add(User(id: id, username: username ?? '...'));
+      LogService.i('مستخدم مكتشف: $username');
+      onDiscoveryChanged?.call();
     }
   }
 
@@ -722,20 +992,28 @@ class LocalNetworkService {
     _setupSocket(socket);
   }
 
-  void _handleTcpMessage(String message, Socket socket) {
+  Future<void> _handleTcpMessage(String message, Socket socket) async {
+    final senderId = _findUserIdBySocket(socket);
+    final msgType = message.contains(':') ? message.substring(0, message.indexOf(':')) : message.substring(0, message.length > 20 ? 20 : message.length);
+    LogService.i('DEBUG _handleTcpMessage: received type=$msgType from=${senderId ?? "unknown"} len=${message.length}');
     try {
       if (message.startsWith('MSG:')) {
+        LogService.i('DEBUG _handleTcpMessage: processing MSG');
         final msg = Message.fromJson(jsonDecode(message.substring(4)));
         msg.content = EncryptionService().decryptText(msg.content);
         if (!_queueService.isRecentlySent(msg.id)) {
-          _dbService.insertMessage(msg);
+          await _dbService.insertMessage(msg);
           final key = msg.senderId == _currentUser?.id ? msg.receiverId : msg.senderId;
           _allMessages.putIfAbsent(key, () => []).add(msg);
           _saveAllMessages();
           onPrivateMessageReceived?.call(msg);
+          LogService.i('DEBUG _handleTcpMessage: MSG saved and delivered, id=${msg.id}');
+        } else {
+          LogService.i('DEBUG _handleTcpMessage: MSG ignored (recently sent), id=${msg.id}');
         }
         if (_readReceipts) {
           _safeWrite(socket, 'MSG_ACK:${jsonEncode({"messageId": msg.id, "timestamp": DateTime.now().toUtc().toIso8601String()})}\n');
+          LogService.i('DEBUG _handleTcpMessage: MSG_ACK sent for ${msg.id}');
         }
       } else if (message.startsWith('GROUP_MSG:')) {
         final data = jsonDecode(message.substring(10));
@@ -809,9 +1087,15 @@ class LocalNetworkService {
         LogService.d('CALL_SIGNAL received: ${decryptedPayload.substring(0, decryptedPayload.length > 80 ? 80 : decryptedPayload.length)}...');
         _handleCallSignal(jsonDecode(decryptedPayload));
       } else if (message == 'PING') {
+        final pingUserId = _findUserIdBySocket(socket);
+        LogService.i('DEBUG _handleTcpMessage: PING received from ${pingUserId ?? "unknown"}, sending PONG');
+        if (pingUserId != null) {
+          _lastPongTime[pingUserId] = DateTime.now();
+        }
         _safeWrite(socket, 'PONG\n');
       } else if (message == 'PONG') {
         final pongUserId = _findUserIdBySocket(socket);
+        LogService.i('DEBUG _handleTcpMessage: PONG received from ${pongUserId ?? "unknown"}');
         if (pongUserId != null) {
           _lastPongTime[pongUserId] = DateTime.now();
           final completer = _pingCompleters[pongUserId];
@@ -821,6 +1105,12 @@ class LocalNetworkService {
         }
       } else if (message.startsWith('MSG_ACK:')) {
         final data = jsonDecode(message.substring(8));
+        LogService.i('DEBUG _handleTcpMessage: MSG_ACK received for messageId=${data['messageId']}');
+        _queueService.handleAck(data['messageId']);
+        onMessageDeliveryStatusChanged?.call(data['messageId'], DeliveryStatus.sent);
+      } else if (message.startsWith('FILE_ACK:')) {
+        final data = jsonDecode(message.substring(9));
+        LogService.i('DEBUG _handleTcpMessage: FILE_ACK received for messageId=${data['messageId']}');
         _queueService.handleAck(data['messageId']);
         onMessageDeliveryStatusChanged?.call(data['messageId'], DeliveryStatus.sent);
       } else if (message.startsWith('CALL_CONNECT:')) {
@@ -955,10 +1245,25 @@ class LocalNetworkService {
   // --- Internal State Management ---
   void _finalizeConnection(User user, Socket socket) {
     final existingSocket = _userSockets[user.id];
-    _userSockets[user.id] = socket;
     if (existingSocket != null && existingSocket != socket) {
-      _safeSocketClose(existingSocket);
+      final existingActive = _isSocketRecentlyActive(existingSocket);
+      final newActive = _isSocketRecentlyActive(socket);
+      if (existingActive && !newActive) {
+        LogService.w(
+            'DEBUG _finalizeConnection: keeping LIVE socket for ${user.username}, closing fresh-but-idle new socket (existingActive=$existingActive newActive=$newActive)');
+        _safeSocketClose(socket);
+        return;
+      }
+      LogService.i(
+          'DEBUG _finalizeConnection: replacing socket for ${user.username} (existingActive=$existingActive newActive=$newActive)');
+      _pendingOldSocketClosers.remove(user.id)?.cancel();
+      _pendingOldSocketClosers[user.id] = Timer(const Duration(seconds: 3), () {
+        _pendingOldSocketClosers.remove(user.id);
+        if (_userSockets[user.id] == existingSocket) return;
+        _safeSocketClose(existingSocket);
+      });
     }
+    _userSockets[user.id] = socket;
     _lastPongTime[user.id] = DateTime.now();
     if (!_friendIds.contains(user.id)) _friendIds.add(user.id);
     _userDirectory[user.id] = user.username;
@@ -1024,18 +1329,19 @@ class LocalNetworkService {
     });
     if (foundId != null) {
       if (_userSockets[foundId] != socket) {
-        LogService.w("_removeSocket skipped for $foundId - socket already replaced");
+        LogService.w("DEBUG _removeSocket: SKIPPED for $foundId - socket already replaced");
         _safeSocketClose(socket);
         return;
       }
       _userSockets.remove(foundId);
       _lastPongTime.remove(foundId);
+      LogService.i("DEBUG _removeSocket: removing socket for $foundId, triggering _quickReconnect");
       if (_friendIds.contains(foundId) && _ipDirectory.containsKey(foundId) && !_callProtectedSockets.contains(foundId)) {
         _doubtfulConnections.add(foundId!);
         _quickReconnect(foundId!);
       }
       onFriendsChanged?.call();
-      LogService.i("Socket removed for $foundId");
+      LogService.i("DEBUG _removeSocket: DONE for $foundId");
       _safeSocketClose(socket);
       return;
     }
@@ -1048,7 +1354,7 @@ class LocalNetworkService {
         _callSockets.remove(callFoundId);
         _callLastPongTime.remove(callFoundId);
         _pendingCallConnections.remove(callFoundId);
-        LogService.i("Socket removed from call channel for $callFoundId");
+        LogService.i("DEBUG _removeCallSocket: removing call socket for $callFoundId");
       }
       if (_friendIds.contains(callFoundId) && _ipDirectory.containsKey(callFoundId)) {
         _quickCallReconnect(callFoundId!);
@@ -1058,20 +1364,29 @@ class LocalNetworkService {
   }
 
   Future<void> _quickReconnect(String userId) async {
-    if (_quickReconnecting.contains(userId)) return;
+    if (_quickReconnecting.contains(userId)) {
+      LogService.w("DEBUG _quickReconnect: SKIPPED for $userId - already reconnecting");
+      return;
+    }
+    if (_pendingConnections[userId] == true) {
+      LogService.w("DEBUG _quickReconnect: SKIPPED for $userId - improved reconnect in flight");
+      return;
+    }
     final lastReconnect = _lastQuickReconnect[userId];
     if (lastReconnect != null && DateTime.now().difference(lastReconnect).inSeconds < 5) {
-      LogService.w("_quickReconnect skipped for $userId - cooldown");
+      LogService.w("DEBUG _quickReconnect: SKIPPED for $userId - cooldown (last: ${lastReconnect})");
       _doubtfulConnections.remove(userId);
       return;
     }
     _lastQuickReconnect[userId] = DateTime.now();
     if (_userSockets.containsKey(userId)) {
+      LogService.w("DEBUG _quickReconnect: removing zombie socket for $userId");
       final zombieSocket = _userSockets.remove(userId);
       if (zombieSocket != null) _safeSocketClose(zombieSocket);
       _lastPongTime.remove(userId);
     }
     if (!_friendIds.contains(userId)) {
+      LogService.w("DEBUG _quickReconnect: $userId not in friend list, aborting");
       _doubtfulConnections.remove(userId);
       return;
     }
@@ -1079,36 +1394,44 @@ class LocalNetworkService {
     _quickReconnecting.add(userId);
     final targetIp = _ipDirectory[userId];
     if (targetIp == null) {
+      LogService.w("DEBUG _quickReconnect: NO IP for $userId, aborting");
       _doubtfulConnections.remove(userId);
       _quickReconnecting.remove(userId);
       onFriendsChanged?.call();
       return;
     }
 
+    LogService.i("DEBUG _quickReconnect: trying to reconnect to $userId at $targetIp");
     for (int i = 0; i < 3; i++) {
       await Future.delayed(const Duration(seconds: 2));
       if (_userSockets.containsKey(userId)) {
+        LogService.i("DEBUG _quickReconnect: socket already exists for $userId, SUCCESS");
         _doubtfulConnections.remove(userId);
         _quickReconnecting.remove(userId);
         return;
       }
       try {
+        LogService.i("DEBUG _quickReconnect: attempt ${i + 1}/3 for $userId...");
         final socket = await Socket.connect(targetIp, 8080, timeout: const Duration(seconds: 3));
+        LogService.i("DEBUG _quickReconnect: TCP connected for $userId, sending RECONNECT...");
         _setupSocket(socket);
         _safeWrite(socket, 'RECONNECT:${jsonEncode(_currentUser!.toJson())}\n');
         await Future.delayed(const Duration(milliseconds: 800));
         if (_userSockets.containsKey(userId)) {
+          LogService.i("DEBUG _quickReconnect: SUCCESS, new socket for $userId");
           _doubtfulConnections.remove(userId);
           _quickReconnecting.remove(userId);
           await _flushPendingQueue(userId, _userSockets[userId]!);
           return;
         }
+        LogService.w("DEBUG _quickReconnect: socket not registered after RECONNECT for $userId");
         _safeSocketClose(socket);
       } catch (e) {
-        LogService.w('_quickReconnect[$userId] محاولة $i فشلت: $e');
+        LogService.w('DEBUG _quickReconnect: attempt ${i + 1}/3 FAILED for $userId: $e');
       }
     }
 
+    LogService.w('DEBUG _quickReconnect: FAILED after 3 attempts for $userId');
     _doubtfulConnections.remove(userId);
     _quickReconnecting.remove(userId);
     onFriendsChanged?.call();
@@ -1247,6 +1570,7 @@ class LocalNetworkService {
 
     socket.listen(
           (data) {
+        _socketLastActivity[socket] = DateTime.now();
         buffer += utf8.decode(data);
         while (buffer.contains('\n')) {
           final messageEndIndex = buffer.indexOf('\n');
@@ -1274,6 +1598,12 @@ class LocalNetworkService {
       if (entry.value == socket) return entry.key;
     }
     return null;
+  }
+
+  bool _isSocketRecentlyActive(Socket socket, {Duration window = const Duration(seconds: 10)}) {
+    final last = _socketLastActivity[socket];
+    if (last == null) return false;
+    return DateTime.now().difference(last) <= window;
   }
 
   String? _findUserIdByCallSocket(Socket socket) {
@@ -1352,6 +1682,7 @@ class LocalNetworkService {
 
   Future<void> _improvedReconnectToFriend(String friendId) async {
     if (_pendingConnections[friendId] == true || _userSockets.containsKey(friendId)) return;
+    if (_quickReconnecting.contains(friendId)) return;
     if (_callProtectedSockets.contains(friendId)) return;
     if (!_shouldAttemptReconnect(friendId)) return;
     final targetIp = _ipDirectory[friendId];
@@ -1404,17 +1735,20 @@ class LocalNetworkService {
   void rejectConnectionRequest(Socket socket) => _safeSocketClose(socket);
 
   Future<void> sendMessage(Message message) async {
-    _dbService.insertMessage(message);
+    LogService.i('DEBUG sendMessage: attempting to send to ${message.receiverId}');
+    await _dbService.insertMessage(message);
     _allMessages.putIfAbsent(message.receiverId, () => []).add(message);
     _saveAllMessages();
     onPrivateMessageReceived?.call(message);
 
     final socket = _userSockets[message.receiverId];
     if (socket == null) {
+      LogService.w('DEBUG sendMessage: NO SOCKET for ${message.receiverId}, enqueueing');
       _enqueueMessage(message, 'text', showInUi: false);
       return;
     }
 
+    LogService.i('DEBUG sendMessage: socket found for ${message.receiverId}, sending PING to verify...');
     final pongCompleter = Completer<bool>();
     _pingCompleters[message.receiverId] = pongCompleter;
     _safeWrite(socket, 'PING\n');
@@ -1425,29 +1759,34 @@ class LocalNetworkService {
     _pingCompleters.remove(message.receiverId);
 
     if (!pongReceived) {
-      LogService.w('sendMessage: لا PONG من ${message.receiverId}، إزالة socket + إعادة اتصال');
-      final deadSocket = _userSockets.remove(message.receiverId);
-      if (deadSocket != null) _safeSocketClose(deadSocket);
+      LogService.w('DEBUG sendMessage: PONG TIMEOUT from ${message.receiverId}, removing socket + reconnecting');
+      if (_userSockets[message.receiverId] == socket) {
+        _userSockets.remove(message.receiverId);
+        _safeSocketClose(socket);
+      }
       _lastPongTime.remove(message.receiverId);
       _enqueueMessage(message, 'text', showInUi: false);
       _quickReconnect(message.receiverId);
       return;
     }
 
+    LogService.i('DEBUG sendMessage: PONG received from ${message.receiverId}, writing MSG...');
     final json = message.toJson();
     json['content'] = EncryptionService().encryptText(message.content);
     if (!_safeWrite(socket, 'MSG:${jsonEncode(json)}\n')) {
-      LogService.e('sendMessage WRITE FAILED for ${message.receiverId}');
+      LogService.e('DEBUG sendMessage: WRITE FAILED for ${message.receiverId}, enqueueing');
       _enqueueMessage(message, 'text', showInUi: false);
       return;
     }
+    LogService.i('DEBUG sendMessage: write completed, waiting for ACK...');
 
     final acked = await _queueService.waitForAck(message.id);
     if (acked) {
+      LogService.i('DEBUG sendMessage: ACK RECEIVED for ${message.id}, delivery confirmed');
       _queueService.markSentSilent(message.id);
       onMessageDeliveryStatusChanged?.call(message.id, DeliveryStatus.sent);
     } else {
-      LogService.w('sendMessage: No ACK for ${message.id}, queuing');
+      LogService.w('DEBUG sendMessage: ACK TIMEOUT for ${message.id}, enqueueing');
       _enqueueMessage(message, 'text', showInUi: false);
     }
   }
@@ -1485,6 +1824,21 @@ class LocalNetworkService {
     _queueService.updatePendingContent(messageId, newContent);
     _dbService.updateMessageContent(messageId, newContent);
 
+    final messageIndex = _allMessages[conversationId]?.indexWhere((msg) => msg.id == messageId);
+    if (messageIndex != null && messageIndex != -1) {
+      final originalMessage = _allMessages[conversationId]![messageIndex];
+      _allMessages[conversationId]![messageIndex] = Message(
+        id: originalMessage.id,
+        senderId: originalMessage.senderId,
+        receiverId: originalMessage.receiverId,
+        content: newContent,
+        timestamp: originalMessage.timestamp,
+        edited: true,
+        editedAt: DateTime.now(),
+      );
+      _saveAllMessages();
+    }
+
     if (onMessageEdited != null) {
       onMessageEdited!(conversationId, messageId, newContent);
     }
@@ -1503,6 +1857,8 @@ class LocalNetworkService {
     _dbService.deleteMessage(messageId);
     _fileMessages[conversationId]?.removeWhere((msg) => msg.id == messageId);
     _saveFileMessages();
+    _allMessages[conversationId]?.removeWhere((msg) => msg.id == messageId);
+    _saveAllMessages();
 
     if (onMessageDeleted != null) {
       onMessageDeleted!(conversationId, messageId);
@@ -1625,11 +1981,13 @@ class LocalNetworkService {
       LogService.e('sendFileMessage: File does not exist: ${file.path}');
       return;
     }
+    LogService.i('DEBUG sendFileMessage: file exists: ${file.path}');
 
     final fileName = p.basename(file.path);
     final fileBytes = await file.readAsBytes();
     final fileSizeBytes = fileBytes.length;
     final messageId = const Uuid().v4();
+    LogService.i('DEBUG sendFileMessage: read $fileSizeBytes bytes, fileName=$fileName, msgId=$messageId');
 
     final localPath = savedPath ?? await _saveFileLocally(fileBytes, '${messageId}_$fileName');
     final fileMessage = FileMessage(
@@ -1651,6 +2009,7 @@ class LocalNetworkService {
 
     final socket = _userSockets[receiverId];
     if (socket == null) {
+      LogService.w('DEBUG sendFileMessage: NO SOCKET for $receiverId, enqueueing file msgId=$messageId');
       final msg = Message(
         id: messageId,
         senderId: _currentUser!.id,
@@ -1668,16 +2027,55 @@ class LocalNetworkService {
       return;
     }
 
+    LogService.i('DEBUG sendFileMessage: socket found for $receiverId, sending PING to verify...');
+    final pongCompleter = Completer<bool>();
+    _pingCompleters[receiverId] = pongCompleter;
+    _safeWrite(socket, 'PING\n');
+    final pongReceived = await pongCompleter.future.timeout(
+      const Duration(milliseconds: 500),
+      onTimeout: () => false,
+    );
+    _pingCompleters.remove(receiverId);
+
+    if (!pongReceived) {
+      LogService.w('DEBUG sendFileMessage: PONG TIMEOUT from $receiverId, removing socket + falling to queue path msgId=$messageId');
+      if (_userSockets[receiverId] == socket) {
+        _userSockets.remove(receiverId);
+        _safeSocketClose(socket);
+      }
+      _lastPongTime.remove(receiverId);
+      final msg = Message(
+        id: messageId,
+        senderId: _currentUser!.id,
+        receiverId: receiverId,
+        content: '[ملف] $fileName',
+        timestamp: DateTime.now(),
+      );
+      final fileMetadata = jsonEncode({
+        'fileName': fileName,
+        'fileType': fileType,
+        'fileSize': fileSizeBytes,
+        'filePath': localPath,
+      });
+      _enqueueMessage(msg, 'file', fileMetadata: fileMetadata);
+      _quickReconnect(receiverId);
+      return;
+    }
+
+    LogService.i('DEBUG sendFileMessage: PONG received from $receiverId, sending file msgId=$messageId');
     try {
       final startData = {
         'type': 'FILE_START',
         'message': fileMessage.toJson(),
       };
       if (!_safeWrite(socket, 'FILE_TRANSFER:${jsonEncode(startData)}\n')) {
+        LogService.e('DEBUG sendFileMessage: FILE_START WRITE FAILED for $receiverId msgId=$messageId');
         throw Exception('FILE_START write failed');
       }
+      LogService.i('DEBUG sendFileMessage: FILE_START sent to $receiverId msgId=$messageId');
 
       const chunkSize = 32 * 1024;
+      int chunkIndex = 0;
       for (int offset = 0; offset < fileBytes.length; offset += chunkSize) {
         final end = (offset + chunkSize > fileBytes.length) ? fileBytes.length : offset + chunkSize;
         final chunk = fileBytes.sublist(offset, end);
@@ -1687,9 +2085,12 @@ class LocalNetworkService {
           'chunk': base64Encode(chunk),
         };
         if (!_safeWrite(socket, 'FILE_TRANSFER:${jsonEncode(chunkData)}\n')) {
+          LogService.e('DEBUG sendFileMessage: FILE_CHUNK $chunkIndex WRITE FAILED for $receiverId msgId=$messageId');
           throw Exception('FILE_CHUNK write failed');
         }
         await socket.flush();
+        LogService.i('DEBUG sendFileMessage: chunk $chunkIndex sent (offset=$offset, bytes=${chunk.length}) msgId=$messageId');
+        chunkIndex++;
       }
 
       final endData = {
@@ -1697,13 +2098,32 @@ class LocalNetworkService {
         'messageId': messageId,
       };
       if (!_safeWrite(socket, 'FILE_TRANSFER:${jsonEncode(endData)}\n')) {
+        LogService.e('DEBUG sendFileMessage: FILE_END WRITE FAILED for $receiverId msgId=$messageId');
         throw Exception('FILE_END write failed');
       }
+      LogService.i('DEBUG sendFileMessage: FILE_END sent to $receiverId msgId=$messageId, transfer complete');
 
     } catch (e) {
       LogService.e('❌ خطأ أثناء إرسال الملف إلى $receiverId: $e');
+      final msg = Message(
+        id: messageId,
+        senderId: _currentUser!.id,
+        receiverId: receiverId,
+        content: '[ملف] $fileName',
+        timestamp: DateTime.now(),
+      );
+      final fileMetadata = jsonEncode({
+        'fileName': fileName,
+        'fileType': fileType,
+        'fileSize': fileSizeBytes,
+        'filePath': localPath,
+      });
+      _enqueueMessage(msg, 'file', fileMetadata: fileMetadata);
       final badSocket = _userSockets[receiverId];
-      if (badSocket != null) _removeSocket(badSocket);
+      if (badSocket != null) {
+        LogService.w('DEBUG sendFileMessage: catch -> queued file msgId=$messageId, removing socket');
+        _removeSocket(badSocket);
+      }
     }
   }
 
@@ -2354,7 +2774,9 @@ class LocalNetworkService {
     });
     
     // إعلام الواجهة المحلية بالمكالمة الواردة
-    onIncomingCall?.call(call);
+    for (final listener in _incomingCallListeners) {
+      listener(call);
+    }
   }
 
   // التعامل مع قبول المكالمة من الطرف الآخر
@@ -2452,7 +2874,7 @@ class LocalNetworkService {
   void _saveGroups() async {
     final prefs = await SharedPreferences.getInstance();
     final groupsJson = _groups.map((groupId, group) => MapEntry(groupId, jsonEncode(group.toJson())));
-    await prefs.setString('groups', jsonEncode(groupsJson));
+    await prefs.setString('user_groups_v1', jsonEncode(groupsJson));
   }
 
   // الحصول على مستخدم بواسطة المعرف
@@ -2478,33 +2900,28 @@ class LocalNetworkService {
   Future<void> leaveGroup(String groupId) async {
     final currentUserId = _currentUser?.id;
     if (currentUserId == null) return;
-    {
-      // إزالة المستخدم من قائمة أعضاء المجموعة
-      final group = _groups[groupId];
-      if (group != null) {
-        final updatedMemberIds = List<String>.from(group.memberIds)..remove(currentUserId);
-        final updatedGroup = Group(
-          id: group.id,
-          name: group.name,
-          adminId: group.adminId,
-          memberIds: updatedMemberIds,
-          createdAt: group.createdAt,
-        );
+    final group = _groups[groupId];
+    if (group != null) {
+      final updatedMemberIds = List<String>.from(group.memberIds)..remove(currentUserId);
+      final updatedGroup = Group(
+        id: group.id,
+        name: group.name,
+        adminId: group.adminId,
+        memberIds: updatedMemberIds,
+        createdAt: group.createdAt,
+      );
 
-        _groups[groupId] = updatedGroup;
-        _saveGroupsData();
+      _groups[groupId] = updatedGroup;
+      _saveGroupsData();
 
-        // حذف رسائل المجموعة
-        _groupMessages[groupId]?.clear();
-        _saveGroupMessages();
+      _groupMessages[groupId]?.clear();
+      _saveGroupMessages();
 
-        // إعلام الأعضاء الآخرين
-        _sendToGroupMembers(groupId, 'GROUP_UPDATE:${jsonEncode({
-          'type': 'LEAVE_GROUP',
-          'groupId': groupId,
-          'userId': currentUserId,
-        })}');
-      }
+      _sendToGroupMembers(groupId, 'GROUP_UPDATE:${jsonEncode({
+        'type': 'LEAVE_GROUP',
+        'groupId': groupId,
+        'userId': currentUserId,
+      })}');
     }
   }
 
@@ -2512,18 +2929,15 @@ class LocalNetworkService {
   Future<void> clearChatMessages(String userId) async {
     final currentUserId = _currentUser?.id;
     if (currentUserId == null) return;
-    {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove('messages_${currentUserId}_$userId');
-      await prefs.remove('messages_${userId}_$currentUserId');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('messages_${currentUserId}_$userId');
+    await prefs.remove('messages_${userId}_$currentUserId');
 
-      // إعلام الأجهزة الأخرى بمسح الرسائل
-      _broadcastMessage({
-        'type': 'clear_messages',
-        'sender_id': currentUserId,
-        'receiver_id': userId,
-      });
-    }
+    _broadcastMessage({
+      'type': 'clear_messages',
+      'sender_id': currentUserId,
+      'receiver_id': userId,
+    });
   }
 
   // حذف ملف من مجموعة
@@ -2575,7 +2989,18 @@ class LocalNetworkService {
           tempPath: tempPath,
           fileSink: sink,
         );
-        LogService.i('📥 بدء استقبال الملف: ${fileMessage.fileName}');
+        final pendingChunks = _pendingFileChunks.remove(fileMessage.id);
+        if (pendingChunks != null && pendingChunks.isNotEmpty) {
+          for (final chunk in pendingChunks) {
+            sink.add(chunk);
+          }
+          LogService.i('📦 صُرفت ${pendingChunks.length} قطع مبكرة للرسالة ${fileMessage.id}');
+        }
+        if (_pendingFileEnds.remove(fileMessage.id) == true) {
+          LogService.i('📦 إكمال نقل وصلته نهايته مبكراً: ${fileMessage.id}');
+          await _completeIncomingFileTransfer(fileMessage.id);
+        }
+        LogService.i('📥 بدء استقبال الملف: ${fileMessage.fileName} (msgId=${fileMessage.id}, temp=$tempPath, size=${fileMessage.fileSize})');
       } catch (e) {
         LogService.e('❌ خطأ في بدء استقبال الملف: $e');
       }
@@ -2591,34 +3016,63 @@ class LocalNetworkService {
         try {
           final chunk = base64Decode(data['chunk'] as String);
           state.fileSink.add(chunk);
+          LogService.i('DEBUG _handleFileTransfer: FILE_CHUNK msgId=$messageId bytes=${chunk.length}');
         } catch (e) {
           LogService.e('❌ خطأ في كتابة حزمة الملف: $e');
           await state.fileSink.close().catchError((_) {});
           _incomingFileTransfers.remove(messageId);
         }
+      } else {
+        try {
+          final chunk = base64Decode(data['chunk'] as String);
+          _pendingFileChunks.putIfAbsent(messageId, () => []).add(chunk);
+          LogService.w('DEBUG _handleFileTransfer: FILE_CHUNK msgId=$messageId buffered (START pending), bytes=${chunk.length}');
+        } catch (e) {
+          LogService.e('❌ خطأ في تخزين قطعة مبكرة: $e');
+        }
       }
     } else if (type == 'FILE_END') {
       final state = _incomingFileTransfers[messageId];
       if (state != null) {
-        try {
-          await state.fileSink.close();
-          final tempFile = File(state.tempPath);
-          final finalPath = '${(await getApplicationDocumentsDirectory()).path}/files/${state.message.id}_${state.message.fileName}';
-          await tempFile.rename(finalPath);
-
-          final completedFileMessage = state.message..filePath = finalPath;
-          final conversationKey = completedFileMessage.groupId ?? completedFileMessage.senderId;
-
-          _fileMessages.putIfAbsent(conversationKey, () => []).add(completedFileMessage);
-          _saveFileMessages();
-          onFileMessageReceived?.call(completedFileMessage);
-          LogService.i('✅ اكتمل استقبال الملف: ${completedFileMessage.fileName}');
-        } catch (e) {
-          LogService.e('❌ خطأ في إنهاء استقبال الملف: $e');
-        } finally {
-          _incomingFileTransfers.remove(messageId);
-        }
+        await _completeIncomingFileTransfer(messageId);
+      } else {
+        _pendingFileEnds[messageId] = true;
+        LogService.w('DEBUG _handleFileTransfer: FILE_END msgId=$messageId deferred (START pending)');
       }
+    }
+  }
+
+  Future<void> _completeIncomingFileTransfer(String messageId) async {
+    final state = _incomingFileTransfers[messageId];
+    if (state == null) return;
+    try {
+      await state.fileSink.close();
+      final tempFile = File(state.tempPath);
+      final finalPath = '${(await getApplicationDocumentsDirectory()).path}/files/${state.message.id}_${state.message.fileName}';
+      await tempFile.rename(finalPath);
+      final savedFile = File(finalPath);
+      LogService.i('DEBUG _handleFileTransfer: FILE_END msgId=$messageId -> saved to $finalPath size=${await savedFile.length()}');
+
+      final completedFileMessage = state.message..filePath = finalPath;
+      final conversationKey = completedFileMessage.groupId ?? completedFileMessage.senderId;
+
+      final existingList = _fileMessages[conversationKey];
+      if (existingList == null || !existingList.any((m) => m.id == completedFileMessage.id)) {
+        _fileMessages.putIfAbsent(conversationKey, () => []).add(completedFileMessage);
+      }
+      _saveFileMessages();
+      onFileMessageReceived?.call(completedFileMessage);
+      LogService.i('✅ اكتمل استقبال الملف: ${completedFileMessage.fileName}');
+
+      final senderSocket = _userSockets[completedFileMessage.senderId];
+      if (senderSocket != null) {
+        _safeWrite(senderSocket, 'FILE_ACK:${jsonEncode({'messageId': completedFileMessage.id})}\n');
+        LogService.i('DEBUG _handleFileTransfer: FILE_ACK sent for ${completedFileMessage.id}');
+      }
+    } catch (e) {
+      LogService.e('❌ خطأ في إنهاء استقبال الملف: $e');
+    } finally {
+      _incomingFileTransfers.remove(messageId);
     }
   }
 }

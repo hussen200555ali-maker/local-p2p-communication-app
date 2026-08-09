@@ -61,6 +61,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       onDiscoveryChanged: () { if (mounted) setState(() {}); },
       onGroupsChanged: () { if (mounted) setState(() {}); },
       onNotificationsChanged: () { if (mounted) setState(() {}); },
+      onStatusChanged: () { if (mounted) setState(() {}); },
       onConnectionRequestReceived: (user, socket) {
         if (mounted) _showConnectionRequestDialog(user, socket);
       }, onMessageDeleted: (conversationId, messageId) {  },
@@ -114,6 +115,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       appBar: AppBar(
         title: Text('أهلاً، ${_currentUser?.username ?? ''}'),
         actions: [
+          IconButton(
+            icon: const Icon(Iconsax.refresh),
+            tooltip: 'بحث عن أصدقاء',
+            onPressed: () {
+              _networkService.sendDiscoverRequest();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('جارٍ البحث...'), duration: Duration(seconds: 2)),
+              );
+            },
+          ),
           IconButton(
             icon: badges.Badge(
               badgeContent: Text(
@@ -213,28 +224,39 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final allFriendIds = _networkService.getFriendIds();
     if (allFriendIds.isEmpty) return const Center(child: Text('ليس لديك أصدقاء بعد.'));
 
-    final connectedFriends = _networkService.getConnectedFriends();
+    final userStatuses = _networkService.getUserStatuses();
     return ListView.builder(
       itemCount: allFriendIds.length,
       itemBuilder: (context, index) {
         final friendId = allFriendIds[index];
         final friend = User(id: friendId, username: _networkService.getUsernameFromDirectory(friendId));
-        final isConnected = connectedFriends.any((u) => u.id == friend.id);
-        final isDoubtful = _networkService.isFriendDoubtful(friend.id);
+        final status = userStatuses[friendId];
 
         Color avatarColor;
         Color statusDotColor;
         String statusText;
 
-        if (isDoubtful) {
-          avatarColor = Colors.orange;
-          statusDotColor = Colors.orange;
-          statusText = 'جارٍ التحقق...';
-        } else if (isConnected) {
+        if (status != null && status.isOnline) {
+          // متصل
           avatarColor = Colors.teal;
           statusDotColor = Colors.green;
           statusText = 'متصل';
+        } else if (status != null && !status.isOnline && status.lastSeen != null) {
+          // غير متصل - تحقق مما إذا كان "جارٍ التحقق" (آخر رؤية حديثة)
+          final timeSinceLastSeen = DateTime.now().difference(status.lastSeen!);
+          if (timeSinceLastSeen.inSeconds < 70) {
+            // جارٍ التحقق
+            avatarColor = Colors.orange;
+            statusDotColor = Colors.orange;
+            statusText = 'جارٍ التحقق...';
+          } else {
+            // غير متصل
+            avatarColor = Colors.grey;
+            statusDotColor = Colors.grey.shade400;
+            statusText = 'غير متصل';
+          }
         } else {
+          // لا توجد حالة - غير متصل
           avatarColor = Colors.grey;
           statusDotColor = Colors.grey.shade400;
           statusText = 'غير متصل';

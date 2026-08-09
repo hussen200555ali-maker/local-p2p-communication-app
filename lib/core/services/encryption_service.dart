@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:encrypt/encrypt.dart' as encrypt;
+import 'log_service.dart';
 
 class EncryptionService {
   static final EncryptionService _instance = EncryptionService._internal();
@@ -32,7 +33,8 @@ class EncryptionService {
       final iv = encrypt.IV.fromBase64(parts[0]);
       final encrypter = encrypt.Encrypter(encrypt.AES(_key!, mode: encrypt.AESMode.cbc));
       return encrypter.decrypt64(parts[1], iv: iv);
-    } catch (_) {
+    } catch (e) {
+      LogService.e('H5 decryptText FAILED for ciphertext len=${ciphertext.length}: $e');
       return ciphertext;
     }
   }

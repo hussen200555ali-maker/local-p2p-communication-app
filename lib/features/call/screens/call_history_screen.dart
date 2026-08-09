@@ -81,7 +81,8 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> with TickerProvid
   // بدء مكالمة جديدة
   void _startCall(String userId, CallType callType) async {
     if (!context.mounted) return;
-    final friend = User(id: userId, username: userId);
+    final realUser = _networkService.getUserById(userId);
+    final friend = realUser ?? User(id: userId, username: userId);
     await CallIntegration().startCall(context, friend, callType);
   }
 
@@ -337,7 +338,7 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> with TickerProvid
             _buildDetailRow('الاتجاه', isOutgoing ? 'صادرة' : 'واردة'),
             _buildDetailRow('الحالة', _getCallStatusText(call.status, isOutgoing)),
             _buildDetailRow(
-              'التاريخ和时间', 
+              'التاريخ والوقت', 
               DateFormat('dd/MM/yyyy - h:mm a').format(call.startTime),
             ),
             if (call.duration != null && call.duration! > 0)

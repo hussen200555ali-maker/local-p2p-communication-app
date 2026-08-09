@@ -1,5 +1,238 @@
 # STATUS.md — تتبع التقدم
 
+## المرحلة 11: إصلاح القطر الدوري للمقبس — خريطة المقابس المكسورة 🔧 (9 أغسطس 2026)
+
+### الخلفية
+بعد نجاح إصلاح سباق START/CHUNK/END (الملف الصغير 813B وصل مع FILE_ACK)، فشل اختبار الملف الكبير (6,375,939B) مرتين بنفس النمط: قطر TCP دوري كل 75-85 ثانية حتى بدون أي نقل. تشريح الكود أثبت أن السبب ليس كود الإرسال بل آلة PING/PONG وخريطة `_userSockets` المكسورة. الخطة معتمدة من كبير المستشارين (تقييم: الإصلاح 1 = السيف، الإصلاح 2 = الدرع، الإصلاح 3 = العقل، الإصلاح 4 = العين).
+
+### السبب الجذري (مؤكد من الكود)
+1. `_finalizeConnection` (سطر 1215) يُنفَّذ مرتين على كل جهاز — مرة للمقبس الخارجي (عند RECONNECT_ACK سطر 1045) ومرة للمقبول (عند RECONNECT سطر 1038). آخر من يكتب يفوز في `_userSockets[peer]`.
+2. في سباق إعادة الاتصال الثنائي يفوز **المقبس الخارجي الميت**، بينما التدفق الحي (PING الوارد + PONG الصادر) يمر عبر المقبس المقبول **غير المسجّل** في الخريطة.
+3. التأجيل 3 ثوانٍ (سطور 1218-1224) يغلق المقبس القديم — أحياناً يقتل المقبس الحي.
+4. الهارتبيت يكتب PING للمقبس الميت → لا PONG → `_lastPongTime` قديم → `_checkFriendStatuses` (70s، سطر 669) و`_startTcpPingPong` (25s، سطر 729) يقتلان دورياً.
+5. عدم التماثل المؤكد: ali يستقبل PONG كل 20s (0 فجوات) بينما hussen يستقبل 0 × PONG — التدفق وحيد الاتجاه ali→hussen.
+
+### الإصلاحات المعتمدة (من كبير المستشارين)
+| # | الإصلاح | الموقع | الوصف |
+|---|---------|--------|-------|
+| 1 | **حارس نشاط المقبس** (الجذري) | `_finalizeConnection` 1215-1225 + `_setupSocket` 1531 | خريطة `_socketLastActivity` تُحدَّث عند استقبال أي بيانات. عند الاستبدال: إن كان القديم نشطاً (<10 ثوانٍ) والجديد خاملاً → أغلق الجديد واحتفظ بالحي. الخريطة تتقارب على المقبس الحامل للتدفق الفعلي. |
+| 2 | **تحديث `_lastPongTime` عند استقبال PING** (الدرع) | معالجة PING سطر 1062 | `_findUserIdBySocket` + تحديث الوقت + رد PONG. استقبال PING يثبت حياة الطرف ويكسر حلقة 70 ثانية حتى لو ضاعت PONG. |
+| 3 | **التحقق قبل القتل** (العقل) | `_checkFriendStatuses` 669-672 | استخراج `_pingAndVerify(userId, socket)` (نمط sendMessage 1703-1711). عند تجاوز مهلة 70s: PING فحص 500ms — إن عاد PONG حدّث الوقت فقط، وإن لم يعد عندها فقط `_quickReconnect`. القطع المدمر يصبح الملاذ الأخير المؤكد. |
+| 4 | **تشخيص DEBUG** (العين) | معالجات PING/PONG + `_startTcpPingPong` | طباعة `_userSockets[peerId]` والاتجاه لتأكيد تقارب الخريطة وثنائية التدفق في الاختبار الميداني. |
+
+### القيود
+- لا تغيير في البروتوكول ولا في الطابور ولا في تنسيق الرسائل.
+- لا مساس بـ `_callSockets` / `_finalizeCallSocket` / `_callProtectedSockets` (المكالمات WebRTC).
+- يبقى التأجيل 3 ثوانٍ للإغلاق الحقيقي في الحالات غير المتنازع عليها.
+- سجلات DEBUG المؤقتة تُبقى — لا تُزل حتى يطلب المستشار صراحة.
+
+### مؤشرات النجاح المخطط لها
+| الفحص | النتيجة |
+|-------|---------|
+| `flutter analyze` | 0 أخطاء |
+| `flutter test` | 24/24 |
+| `flutter build apk --debug` | ناجح |
+| تراجع صغير | ✅ 813B + FILE_ACK |
+| كبير ~6MB | ✅ وصول 6,375,939B + FILE_ACK + `ls -la` على hussen |
+| سجلات DEBUG | الخريطة تقاربت على المقبس الحي + PING/PONG في الاتجاهين (انتهاء عدم التماثل) |
+| iptables (DROP 8080 من ali ثم `-D`) | catch ← طابور ← reconnect ← flush ← وصول ← ACK |
+
+### نتائج التنفيذ (9 أغسطس 2026)
+- **الإصلاح 1 (حارس نشاط المقبس)**: خريطة `_socketLastActivity` تُحدَّث في `_setupSocket` عند استقبال أي بيانات؛ `_finalizeConnection` يرفض فوراً المقبس الجديد إن كان القديم نشطاً (<10 ثوانٍ)، وإلا يؤجل 3 ثوانٍ للإغلاق الحقيقي.
+- **الإصلاح 2 (الدرع)**: معالجة PING تحدّث `_lastPongTime` عبر `_findUserIdBySocket` وتُجيب PONG — استقبال PING يثبت الحياة حتى لو ضاعت PONG.
+- **الإصلاح 3 (العقل)**: `_checkFriendStatuses` صار async ويستدعي `_pingAndVerify(userId, socket)` (PING فحص 500ms)؛ القتل/`_quickReconnect` أصبح الملاذ الأخير فقط بعد فشل PONG الفحص.
+- **الإصلاح 4 (العين)**: سجلات DEBUG في PING/PONG/`_startTcpPingPong` تُظهر الهوية والاتجاه وتقارب الخريطة.
+
+### مؤشرات النجاح المحققة
+| الفحص | النتيجة |
+|-------|---------|
+| `flutter analyze` | ✅ 0 errors |
+| `flutter test` | ✅ 24/24 |
+| `flutter build apk --debug` | ✅ BUILD SUCCESSFUL (218,438,737 بايت) |
+| تثبيت الجهازين | ✅ Success (ali 192.168.1.126 / hussen 192.168.1.127) |
+| اختبار الاستقرار >4 دقائق | ✅ ثنائية الاتجاه PING/PONG + `lastPongAge` مثبّت (ali 16-19s، hussen 2-3s) + صفر قطر بعد بدء التشغيل |
+| تراجع صغير | ✅ 813B + FILE_ACK (msgId `0aafdba1-dcfb-468a-863b-5afb710e3f19`) |
+| كبير ~6MB | ✅ 6,375,939B + FILE_ACK + `ls -la` على hussen (msgId `5e670bc2-670f-4e6c-aae8-6c700ddffd88`) |
+| صفر قطر أثناء النقل | ✅ لا zombie/PONG TIMEOUT/quickReconnect/WRITE FAILED خلال نافذة الإرسال |
+| سجلات DEBUG | ✅ الخريطة تقاربت + PING/PONG في الاتجاهين (انتهاء عدم التماثل) |
+| iptables DROP ثم `-D` | ✅ catch ← طابور ← reconnect ← flush ← وصول 813B ← FILE_ACK على ali |
+
+### تفاصيل الاختبار الميداني
+- **التحقق من القرص على hussen** عبر `run-as com.example.local_social_app`: `app_flutter/files/5e670bc2-…_scaled_test_media_large.png` = **6,375,939 بايت** (22:24) و`0aafdba1-…_scaled_phase11_small.png` = **813 بايت** (22:23). المسار المباشر `/data/user/0/...` مرفوض بالأذونات — `app_flutter/files` هو الصحيح (getApplicationDocumentsDirectory).
+- **قطرتا بدء التشغيل الوحيدتان** (22:14:52 ali / 22:15:12 hussen): تنظيف مقبس قديم عند التقارب الأولي، لا نمط قطر.
+- **iptables — مرحلة الإسقاط**: `su` + `iptables` متاحان على ali؛ `iptables -I OUTPUT -p tcp --dport 8080 -j DROP` (مؤكدة في `-L -n -v`). سجل `ali_ipt.log`: **PONG TIMEOUT → إزالة المقبس + الاحتجاز في الطابور** msgId=`76b8978b-8fbb-416b-a69a-4e2742c18f54` → 3 محاولات `_quickReconnect` فشلت كلها بـ `Connection timed out` (القاعدة تمنع حتى SYN — أسوأ حالات القطع).
+- **iptables — مرحلة الاسترداد**: `iptables -D OUTPUT -p tcp --dport 8080 -j DROP` + انتظار 25 ثانية. سجل `hus_ipt2.log`: hussen يكشف `TCP PONG timeout` (22:28:11) → `_removeSocket` → `_quickReconnect` attempt 1/3 → `TCP connected` + RECONNECT/RECONNECT_ACK → `SUCCESS`. ثم `ali_ipt2.log`: ali يستقبل RECONNECT (22:27:49) → `flushQueue: sending FILE msgId=76b8978b bytes=813` → hussen يحفظ `76b8978b-…_scaled_test_media.png size=813` → FILE_ACK → وصل على ali. **الملف المحجوز لم يضِع — استرد كاملاً.**
+- **فرق ساعات الأجهزة**: hussen يسبق ali بـ ~24 ثانية (أُعيد قياسه عبر تطابق زمن RECONNECT/RECONNECT_ACK 22:27:49 ali ↔ 22:28:13 hussen).
+
+### خطوات الإنجاز
+1. [x] توثيق هذه الجولة في STATUS.md (هذا القسم) — **قبل أي كود**
+2. [x] الإصلاحات 1-4 في `local_network_service.dart`
+3. [x] `flutter analyze` + `flutter test` + `flutter build apk --debug`
+4. [x] تثبيت على ali (192.168.1.126:5555) و hussen (192.168.1.127:5555)
+5. [x] اختبارات ميدانية: صغير ← كبير ← iptables + فحص DEBUG
+6. [ ] تحديث هذا القسم بالنتائج + الارتكاب الكامل
+
+---
+
+## المرحلة 10: الجولة الختامية — وسائط + بنود كبير المستشارين 📋 (4 أغسطس 2026)
+
+### الخلفية
+بعد اكتمال تشخيص الوسائط (المرحلة 9) تبيّن أن الملفات بلا شبكة أمان: لا PING-verify قبل الإرسال، ولا طابور/إعادة عند سقوط منتصف الإرسال، ولا ACK عند المستقبل. تعتمد الجولة الختامية إصلاحين معتمدين للوسائط + بنود كبير المستشارين (C-2, C-3, H-2, H-3, H-4, H-7, H-8, H-10, M-1, H-5, C-1).
+
+### الإصلاحان المعتمدان للوسائط (من المستشار)
+| # | الإصلاح | الموقع | الوصف |
+|---|---------|--------|-------|
+| 1 | **PING-verify قبل إرسال الملف** | `sendFileMessage` (1903-2004) | نسخ آلية `sendMessage` (1694-1714): `_pingCompleters` + `_safeWrite('PING\n')` + مهلة 500ms قبل قراءة الملف. فشل PONG → حذف المقبس بحارس هوية + `_lastPongTime.remove` + `_quickReconnect` + النزول لمسار الطابور. |
+| 2 | **شبكة أمان طابور/ACK للملفات** | `sendFileMessage` catch + `_handleFileTransfer` + `_handleTcpMessage` + `flushQueue` | (أ) catch → `_enqueueMessage(msg,'file',fileMetadata)` ثم `_removeSocket` — الاسترداد موجود أصلاً (`_flushPendingQueue` بعد reconnect، و`flushQueue` في `_finalizeConnection`). (ب) `_handleFileTransfer` FILE_END → `FILE_ACK` عبر `_userSockets[state.message.senderId]` + حارس عدم تكرار `_fileMessages`. (ج) `_handleTcpMessage` بعد 1075 → معالجة `FILE_ACK:` (نسخة MSG_ACK 1071-1075). (د) `flushQueue` file path 199-203 → `waitForAck` قبل `markSent` (نسخة مسار النص 218-230). |
+
+### بنود كبير المستشارين (مستوى التصحيح حسب السياق)
+| البند | الموقع | الإصلاح |
+|-------|--------|---------|
+| C-2 | `leaveGroup` 2774+ / `clearChatMessages` 2808 | استخدام `_currentUser!.id` |
+| C-3 | `_saveGroups` 2748-2752 | مفتاح `'groups'` ← `'user_groups_v1'` |
+| H-2 | text | النص `'التاريخ والوقت'` |
+| H-3 | `call_history_screen.dart` 84 | جلب `User` حقيقي عبر `getUserById` بدل الكائن الوهمي |
+| H-4 | `call_manager.dart` 165-183 | إزالة `getActiveCalls().first.id` |
+| H-7 | edit/delete | تحديث `_allMessages` للمرسل أيضاً |
+| H-8 | `insertMessage` 974/1682 | `await` قبل الاستمرار |
+| H-10 | `call_manager.dart` `_configuration` 51-57 | تعطيل STUN — `iceServers` فارغة |
+| M-1 | `stop()` 220-253 | تنظيف `_typingTimers` (نموذج إلغاء المؤقتات من `stop()` القائم) |
+| H-5 | `_handleTcpMessage` فك التشفير | `LogService.e` عند فشل فك التشفير |
+| C-1 | `registerCallbacks`/`unregisterCallbacks` 255-331 | إعادة بناء نظام callbacks (كتلة call-callbacks موجودة 321-325) |
+
+### القيود
+- لا تغيير في آلية PING/PONG (25s) ولا حجم الحزم (32KB)؛ لا ACK في مسار النجاح المباشر.
+- سجلات DEBUG المؤقتة تُبقى — لا تُزل حتى يطلب المستشار صراحة.
+- لا تُلمس شفرات مُصلحة سابقاً أو غير مخطئة.
+- `flutter analyze` قبل/بعد كل مرحلة؛ `flutter build apk --debug` قبل أي اختبار.
+
+### مؤشرات النجاح المخطط لها
+| الفحص | النتيجة |
+|-------|---------|
+| `flutter analyze` | ✅ نظيف قبل وبعد كل مرحلة |
+| `flutter build apk --debug` | ✅ قبل الاختبار |
+| تراجع صغير | ✅ FILE_ACK عند المرسل |
+| كبير ~6MB | ✅ وصول + FILE_ACK |
+| iptables (إسقاط 8080 من .124 ثم `-D` فوراً) | ✅ catch ← طابور ← reconnect ← flush ← وصول ← ACK |
+
+### نتائج التنفيذ (4 أغسطس 2026)
+- **الإصلاح 1 (PING-verify)**: أُدرج في `sendFileMessage` بعد فحص المقبس (نفس نمط `sendMessage`: `_pingCompleters` + PING + مهلة 500ms)؛ فشل PONG → إزالة المقبس بحارس هوية + `_lastPongTime.remove` + `_enqueueMessage` + `_quickReconnect`.
+- **الإصلاح 2 (أ)**: catch في `sendFileMessage` → `_enqueueMessage(msg,'file',fileMetadata)` ثم `_removeSocket(badSocket)` (الملف لم يعد يضيع؛ يسترد تلقائياً بعد reconnect).
+- **الإصلاح 2 (ب)**: `_handleFileTransfer` FILE_END → `FILE_ACK` عبر `_userSockets[senderId]` + حارس عدم تكرار الإضافة لـ `_fileMessages`.
+- **الإصلاح 2 (ج)**: `_handleTcpMessage` يعالج `FILE_ACK:` (نسخة MSG_ACK → `_queueService.handleAck` + حالة `sent`).
+- **الإصلاح 2 (د)**: `flushQueue` مسار الملف → `waitForAck` قبل `markSent` (نسخة مسار النص).
+- **بنود كبير المستشارين**:
+  - C-2: `leaveGroup`/`clearChatMessages` تنظيف كتلة `{}` الزائدة (تبقى null-safe عبر `_currentUser?.id`).
+  - C-3: `_saveGroups` → مفتاح `'user_groups_v1'` (مطابق لمسار التحميل 2229).
+  - H-2: `'التاريخ和时间'` ← `'التاريخ والوقت'` (call_history_screen.dart:340).
+  - H-3: `_startCall` يبحث `getUserById` ثم fallback (call_history_screen.dart:84).
+  - H-4: `startCall` بلا `getActiveCalls().first.id` — بحث محدد بالمستلم (call_manager.dart).
+  - H-7: `editMessage`/`deleteMessage` تحدّث `_allMessages` للمرسل + `_saveAllMessages`.
+  - H-8: `await _dbService.insertMessage` في `sendMessage` + `_handleTcpMessage` (صار `Future<void>`).
+  - H-10: `iceServers` فارغة — STUN معطّل (call_manager.dart `_configuration`).
+  - M-1: `stop()` يلغي ويمسح `_typingTimers`.
+  - H-5: `decryptText` يسجّل `LogService.e` عند فشل فك التشفير.
+  - C-1: call-callbacks صارت دائمة — `unregisterCallbacks` لم تعد تمسحها (كانت تُقتل نهائياً بعد أي screen dispose)؛ `onIncomingCall` تحوّلت لقائمة مستمعين multicast (ملكية مشتركة: CallManager + home_screen).
+
+### مؤشرات النجاح المحققة
+| الفحص | النتيجة |
+|-------|---------|
+| `flutter analyze` | ✅ 0 errors — 33 issues (نفس خط الأساس: 4 warnings + 29 infos، لا جديد) |
+| `flutter test` | ✅ 24/24 passed |
+| `flutter build apk --debug` | ✅ BUILD SUCCESSFUL — app-debug.apk (218MB) |
+
+### الحالة
+- [x] توثيق هذه الجولة في STATUS.md (هذا القسم)
+- [x] الإصلاح 1 (PING-verify) + الإصلاح 2 (أ/ب/ج/د)
+- [x] بنود C (C-2, C-3) ثم H (H-2, H-3, H-4, H-7, H-8, H-10) ثم M-1/H-5/C-1
+- [x] `flutter analyze` + `flutter test` + `flutter build apk --debug`
+- [ ] تثبيت push/`pm install -r` على الجهازين — **مؤجل**: الجهازان (192.168.1.124/.125) غير قابلين للوصول (ping و `adb connect` يفشلان) — قرار المستخدم: اكتفِ بالتعديلات والبناء الناجح
+- [ ] اختبارات التحقق (صغير، كبير، iptables) — **مؤجل** بنفس السبب
+- [ ] تقرير النتائج النهائية للمستشار — يسبقه إنجاز الاختبارات الميدانية
+
+---
+
+## المرحلة 8: إصلاح فشل تسليم الرسائل TCP (0/10) ✅ (4 أغسطس 2026)
+
+### الخلفية
+اختبار 10 رسائل متتالية بين المحاكيين (ali=.124 يرسل إلى hussen=.125) عبر uiautomator: **0/10 وصلت**. كل رسالة تصل إلى `sendMessage` وعلى الفور يفشل `socket.write('PING\n')` رمياً استثناءً متزامناً لأن المقبس في `_userSockets[receiverId]` ميت بالفعل.
+
+### السبب الجذري (موثّق بالكامل من السجلين)
+1. **المقبس يموت بصمت قبل كل إرسال**: المستلم يرى `Socket onDone (remote closed)` قبل 300-500ms من محاولة الإرسال (مثال: `15:52:20.338` عند المستقبل مقابل `sendMessage: attempting` عند `15:52:20.803`).
+2. **لا يوجد كود تطبيق يعمل لحظة الموت**: المرسل صامت تماماً 7 ثوانٍ بين `SUCCESS, new socket` (13.687) والإرسال التالي (20.803) — لا PING/PONG ولا مؤقت ولا onDone/onError قبل فشل الكتابة.
+3. **العاصفة الحقيقية**: `_finalizeConnection` يغلق المقبس السابق فوراً عند كل RECONNECT/RECONNECT_ACK (السطر 1205) → FIN للطرف الآخر → `onDone` → `_removeSocket` → `_quickReconnect` → اتصال جديد → إغلاق جديد. شوهد في سجل المستقبل: `Finalized connection` مرتين + `onDone` مرتين في 200ms.
+4. **ميكانيزمان متزامنان لإعادة الاتصال** (`_quickReconnect` و `_improvedReconnectToFriend`) لا يحرس أحدهما الآخر → اتصالات متوازية تنافسية.
+5. **sendMessage يستسلم**: عند فشل PING يحذف المقبس ويُدخل الرسالة في الطابور ويتوقف — بدون إعادة اتصال فورية وإعادة إرسال.
+
+### الإصلاح المعتمد (من المستشار الأعلى — الخيار أ)
+| # | الإصلاح | الموقع | الوصف |
+|---|---------|--------|-------|
+| 1 | **Single-flight reconnect** | `_quickReconnect` (1306) + `_improvedReconnectToFriend` (1612) | حارس متقاطع: `_quickReconnect` يخرج مبكراً إذا `_pendingConnections[userId]==true`، و `_improvedReconnectToFriend` يخرج مبكراً إذا `_quickReconnecting.contains(friendId)`. لا محاولتان لنفس الصديق في وقت واحد. |
+| 2 | **لا إغلاق مبكر للمقبس السابق** | `_finalizeConnection` (1201) | استبدال `_safeSocketClose(existingSocket)` الفوري بإغلاق مؤجل (3 ثوانٍ) عبر `_pendingOldSocketClosers` مع فحص هوية: يُغلق فقط إذا لم يعد في الخريطة. يمنع FIN المبكر الذي يشعل العاصفة. |
+| 3 | **إعادة اتصال + إعادة إرسال عند فشل PING** | `sendMessage` (1665) | عند فشل PING/PONG (أو مقبس `done`): أزل المقبس، أدخل الرسالة في الطابور، انتظر `_quickReconnect`، ثم `_flushPendingQueue` للرسائل غير المؤكدة. |
+
+### ما لم يُفعل (حسب التوجيه)
+- لا تعديل على VirtualBox أو الشبكة.
+- لا سجلات هوية مقبس (فقط إذا فشل الإصلاح أ).
+
+### مؤشرات النجاح
+| الفحص | النتيجة |
+|-------|---------|
+| `flutter analyze` | ✅ نظيف — لا أخطاء (تحذيرات/ملاحظات سابقة فقط) |
+| `flutter build apk --debug` | ✅ نجح (Gradle assembleDebug 542.9s) |
+| إعادة اختبار 10 رسائل | ✅ **10/10** — تأكيد ثلاثي: 10 ACK عند المرسل + 10 "MSG saved and delivered" عند المستقبل + test1..test10 مطابقة بالمعرّف في قاعدة بيانات المستقبل (SQLite). |
+
+### ملاحظات التنفيذ (4 أغسطس 2026)
+- تم تثبيت APK على الجهازين عبر push + `pm install -r` (الأمر المباشر `adb install` يتجمد).
+- عند كل إرسال يسقط المقبس أثناء `PING` (البيئة)، لكن الإصلاحات تلتقطه: PONG TIMEOUT → إعادة اتصال → `Flushed 1 pending` → ACK. التسليم أصبح موثوقاً رغم سقوط المقبس المتكرر.
+- ملاحظة: يظهر في السجلات ازدواج `Finalized connection` (RECONNECT + RECONNECT_ACK على نفس المقبس) وسقوط دوري ~3 ثوانٍ بعد إعادة الاتصال بسبب سباق التوصيل المزدوج (كلا الطرفين يبدأ إعادة الاتصال) — لم يمنع التسليم، ويستحق المراجعة لاحقاً.
+
+### الحسم
+- ✅ **مشكلة "الرسائل تعلق بعد السابعة" حُلّت.** اختبار 10 رسائل متتالية (test1..test10) بين ali=.124 و hussen=.125 أُعيد بعد الإصلاحات ووُصّلت الرسائل العشر بالكامل (10/10) بتأكيد ثلاثي: 10 ACK عند المرسل + 10 "MSG saved and delivered" عند المستقبل + مطابقة المعرّفات في SQLite.
+- **ملاحظة مؤجلة بقرار المستشار**: تحسين الازدواج (سباق التوصيل المزدوج والسقوط الدوري) لا يُلمس الآن — يُعالج في جولة تحسينات لاحقة.
+
+### حالة ختامية
+الجولة منتهية — ملف "الرسائل لا تصل" مغلق.
+
+---
+
+## المرحلة 9: تشخيص فشل إرسال الوسائط (الصور والملفات) 🔍 (4 أغسطس 2026)
+
+### المشكلة
+الوسائط تظهر "فشل" للمرسل ولا تصل للمستقبل. النص يعمل (10/10) لأن له شبكة أمان (PING-verify + طابور + إعادة إرسال)، بينما الملفات **لا تملكها**.
+
+### الفرضيات المعتمدة (من فحص الكود)
+| # | الفرضية | الموقع |
+|---|---------|--------|
+| H1 🔴 | المقبس يموت أثناء الإرسال المباشر → `_safeWrite` يرمي → catch → حذف المقبس → الملف يضيع نهائياً (لا طابور ولا إعادة) | `sendFileMessage` (1903-1990) |
+| H2 🟡 | لا يوجد PING-verify قبل إرسال الملف (بخلاف `sendMessage`) | 1903 مقابل 1680 |
+| H3 🟡 | لا يوجد ACK للملفات — `flushQueue` يستخدم `markSent` بلا تأكيد | `message_queue_service.dart` 148-204 |
+| H4 ⚪ | `utf8.decode(data)` لكل حزمة — انقسام حرف عربي عبر حزمتين يرمي استثناء | `_setupSocket` 1523 |
+| H5 ⚪ | مصدر أيقونة "فشل": `_messageStatuses[file.id]` لا يُضبط للإرسال المباشر | `chat_screen.dart` 581 |
+
+### أجهزة القياس المؤقتة (تُزال بعد التقرير)
+- `sendFileMessage`: بعد `exists()` + نتيجة كل `_safeWrite` (START/حزم/END) + في `catch` (هل دخل الطابور؟ هل أُبلغ المرسل؟) + مسار الطابور عند غياب المقبس.
+- `_handleFileTransfer`: عدد الحزم/بايت كل حزمة + نتيجة FILE_END + "حزمة بلا نقل نشط".
+- `flushQueue` (file): محاولة الإرسال + `markSent`/`markFailed`.
+
+### إعادة الإنتاج (خطة)
+صورة صغيرة واحدة أولاً (دفع + media-scan على .124) → إرسال عبر المعرض → فحص سجل المُستقبِل + `files/` + SQLite → صورة أكبر ثانياً.
+
+### نتائج التشخيص (فُضِّلت وأُنجزت 4 أغسطس 2026)
+- **لم يتكرر الفشل في البناء الحالي.** كلا الاختبارين نجحا طرف-لطرف:
+  - صورة صغيرة `scaled_test_media.png` (813 B): START → chunk واحد → END، حُفظت عند المستقبل، ظهرت في واجهته.
+  - صورة كبيرة `scaled_test_media_large.png` (6,375,939 B، 195 حزمة 32KB): الإرسال استغرق ~51 ثانية، اكتمل، حُفظت كاملة عند المستقبل، ظهرت في الواجهتين.
+- **المقبس يموت أثناء/بعد الإرسال الطويل**: بسبب انشغال المقبس في حلقة إرسال 195 حزمة، تأخر PONG >25 ثانية → `TCP PONG timeout` → حذف المقبس → إعادة اتصال (`_quickReconnect`). في هذين الاختبارين سقط المقبس **بعد** FILE_END فلم يضِع الملف.
+- **H1 مؤكَّد كمخاطرة كامنة (لم تُفعَّل هذه المرة)**: لو سقط المقبس في منتصف الحزم لرمى `_safeWrite` → catch في `sendFileMessage` يحذف المقبس فقط (لا طابور، لا إعادة، لا حالة فشل) → الملف يضيع نهائياً. دليل: ملفات `temp_*` يتيمة عند المستقبل من إرسالات فاشلة سابقة (`temp_562c3b41…` 3.5MB بتاريخ 31/7، و`temp_8cc66099…` 0 بايت بتاريخ 1/8).
+- **H5 مؤكَّد جزئياً**: الإرسال المباشر لا يضبط `_messageStatuses[file.id]` أبداً → لا يمكن أن تظهر أيقونة "فشل" من هذا المسار؛ أي "فشل" ظهر سابقاً هو من سقوط منتصف الإرسال قبل إصلاح A (الملف كان يختفي صامتاً).
+- **H3 مؤكَّد**: `_handleFileTransfer` لا يرسل ACK أبداً — `flushQueue` يعتمد `markSent` بلا تأكيد (يؤثر على مسار الطابور فقط).
+- لا تحذيرات "حزمة بلا نقل نشط" ولا أي فشل FILE_TRANSFER في الجولة (التحقق: `grep` كامل السجلين).
+
+### القيد
+**لا إصلاح** — تشخيص فقط. تقرير يحدد "في أي سطر يختفي الملف" قبل أي تعديل. (إجابة التقرير: في السطر الحالي لا يختفي؛ نقطة الخطر هي catch في `sendFileMessage` مع سقوط منتصف الإرسال.)
+
+---
+
 ## المرحلة 6: التدقيق النهائي وإغلاق الفجوات ✅ (29 يونيو 2026)
 
 ### الفجوات المكتشفة من داخل الكود الفعلي
@@ -477,3 +710,76 @@ Finalized → onDone → Socket removed → Finalized → onDone → Socket remo
 - [ ] اختبار السيناريو العكسي: إغلاق Android فجأة وملاحظة استجابة Windows
 - [ ] منع `_improvedReconnectToFriend` من التشغيل عند كل DISCOVER (debounce) — ✅ تم (5 يوليو)
 - [ ] إصلاح SQLite error عند بدء التشغيل — ✅ تم (5 يوليو)
+
+---
+
+## إعادة تصميم نظام الاستكشاف - المرحلة 1 ✅ (1 أغسطس 2026)
+
+### ما تم
+| الفحص | النتيجة |
+|-------|---------|
+| `flutter analyze` | 0 errors ✅ |
+| `flutter build apk --debug` | BUILD SUCCESSFUL ✅ |
+| تثبيت على hussen (192.168.1.124) | SUCCESS ✅ |
+| تثبيت على ali (192.168.1.125) | SUCCESS ✅ |
+| كشف USER_ONLINE | يعمل على الجهازين ✅ |
+| اتصال TCP بعد USER_ONLINE | يعمل ✅ |
+| خادم TCP 8080 | يعمل على الجهازين ✅ |
+| TCP Scan | يعمل ✅ |
+
+### التعديلات المطبقة
+
+| # | التعديل | الموقع | الوصف |
+|---|---------|--------|-------|
+| 1 | **إصلاح duplicate _performAnnouncement()** | `local_network_service.dart:532` | حذف النسخة القديمة والاحتفاظ بالجديدة التي تستدعي `_broadcastOnlineStatus()` |
+| 2 | **_startAnnouncing() → _sendInitialOnlineAnnouncement()** | `local_network_service.dart:537-544` | إرسال 3 إعلانات USER_ONLINE عند بدء التشغيل مع 500ms بين كل واحدة |
+| 3 | **_sendOfflineAnnouncement()** | `local_network_service.dart:546-558` | إرسال USER_OFFLINE عند إيقاف الخدمة |
+| 4 | **_broadcastOnlineStatus()** | `local_network_service.dart:560-578` | إرسال USER_ONLINE للحفاظ على الاتصال (كل 60 ثانية) |
+| 5 | **sendDiscoverRequest()** | `local_network_service.dart:580-593` | إرسال DISCOVER_REQUEST يدوياً (زر التحديث) |
+| 6 | **_handleDiscoveryMessage()** | `local_network_service.dart:770-817` | توجيه الرسائل حسب النوع: USER_ONLINE, USER_OFFLINE, DISCOVER_REQUEST, LEGACY |
+| 7 | **_handleUserOnline()** | `local_network_service.dart:836-868` | معالجة USER_ONLINE: تحديث الدليل، تحديث الحالة، محاولة اتصال TCP |
+| 8 | **_handleUserOffline()** | `local_network_service.dart:870-891` | معالجة USER_OFFLINE: تحديث الحالة، إغلاق TCP |
+| 9 | **_handleDiscoverRequest()** | `local_network_service.dart:893-903` | معالجة DISCOVER_REQUEST: الرد بـ USER_ONLINE |
+| 10 | **_handleLegacyDiscover()** | `local_network_service.dart:905-933` | للتوافق مع الإصدارات القديمة |
+| 11 | **_startHeartbeatSystem()** | `local_network_service.dart:620-641` | نظام جديد: USER_ONLINE كل 60 ثانية + TCP PING/PONG كل 20 ثانية |
+| 12 | **_checkFriendStatuses()** | `local_network_service.dart:644-670` | فحص حالة الأصدقاء وتحديثها (مهلة 70 ثانية) |
+| 13 | **_updateFriendStatus()** | `local_network_service.dart:673-683` | تحديث حالة صديق معين |
+| 14 | **_startTcpPingPong()** | `local_network_service.dart:686-711` | TCP PING/PONG كل 20 ثانية للحفاظ على الاتصالات حية |
+| 15 | **_handleFriendDisconnected()** | `local_network_service.dart:713-723` | معالجة انقطاع صديق (بدون إرسال UDP) |
+
+### النتائج من السجلات
+
+**hussen (192.168.1.124):**
+- ✅ تلقى USER_ONLINE من ali
+- ✅ حاول اتصال TCP بعد USER_ONLINE
+- ✅ خادم TCP 8080 يعمل
+- ✅ TCP Scan مكتمل (192.168.1.x)
+- ✅ اتصال TCP مع ali (192.168.1.125) ناجح
+- ✅ الخدمة بدأت كـ v7.1
+
+**ali (192.168.1.125):**
+- ✅ تلقى USER_ONLINE من hussen
+- ✅ حاول اتصال TCP بعد USER_ONLINE
+- ✅ خادم TCP 8080 يعمل
+- ✅ TCP Scan مكتمل (192.168.1.x)
+- ✅ اتصال TCP مع hussen (192.168.1.124) ناجح
+- ✅ أرسل 3 إعلانات USER_ONLINE عند بدء التشغيل
+
+### البروتوكول الجديد (v7.1)
+
+| الرمز | النوع | الوصف |
+|-------|-------|-------|
+| `USER_ONLINE` | UDP | إرسال عند بدء التشغيل + كل 60 ثانية (Keep-Alive) |
+| `USER_OFFLINE` | UDP | إرسال عند إيقاف الخدمة |
+| `DISCOVER_REQUEST` | UDP | إرسال يدوياً (زر التحديث) |
+| `PING` | TCP | إرسال كل 20 ثانية للحفاظ على الاتصال |
+| `PONG` | TCP | رد على PING |
+| `DISCOVER_TCP` | TCP | كشف عبر TCP (بدلاً من UDP broadcast) |
+| `DISCOVER_TCP_RESPONSE` | TCP | رد على DISCOVER_TCP |
+
+### الخطوات التالية
+
+- [ ] المرحلة 2: اختبار timeout 70 ثانية وتحديث الحالة
+- [ ] المرحلة 3: إضافة زر التحديث في home_screen.dart
+- [ ] المرحلة 4: تحديث نقاط الحالة (أخضر/برتقالي/رمادي)
+- [ ] المرحلة 5: اختبار 8 سيناريوهات
