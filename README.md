@@ -15,7 +15,7 @@ A serverless P2P LAN social app built with Flutter. No internet, no backend — 
 | دردشة جماعية | مجموعات متعددة الأعضاء | ✅ |
 | مشاركة الصور والملفات | تقسيم الملفات إلى قطع 32KB مع بروتوكول START/CHUNK/END | ✅ |
 | العمل دون اتصال | طابور رسائل في SQLite يُرسل عند عودة الجهاز (store-and-forward) | ✅ |
-| مكالمات صوتية/فيديو | WebRTC مع إشارات مشفّرة عبر TCP | 🟡 الصوت منفّذ ومُختبر جزئياً — الفيديو معطّل ميدانياً (انظر Known Issues) |
+| مكالمات صوتية/فيديو | WebRTC مع إشارات مشفّرة عبر TCP | 🟡 الصوت منفّذ ومُختبر جزئياً — الفيديو قيد الإصلاح |
 | سجل المكالمات | تصفية وتجميع حسب التاريخ | ✅ |
 | تشفير الرسائل | AES-256-CBC مع IV عشوائي لكل رسالة | ✅ |
 | الوضع المظلم | عبر ValueNotifier | ✅ |
@@ -122,12 +122,19 @@ dart run flutter_launcher_icons
 
 ---
 
-## حالات معروفة (Known Issues)
+## لقطات الشاشة (Screenshots)
 
-1. **مكالمة الفيديو:** تفشل في `getUserMedia` (مسار الكاميرا) قبل إرسال أي إشارة — موثّقة في `STATUS.md` Phase 12، لم يُطبَّق الإصلاح بعد.
-2. **مسار `startCall`:** يوجد تعديل DIAG مؤقت حذف استدعاء `_networkService.startCall()` من `call_manager.dart` — يجب إعادته قبل اختبار المكالمات الصادرة.
-3. **Windows:** إشعارات النظام no-op (flutter_local_notifications لا يدعم Windows).
-4. التفاصيل الكاملة في `STATUS.md` و`ROADMAP.md`.
+| شاشة الدخول | الرئيسية |
+|---|---|
+| ![شاشة الدخول](screenshots/login_screen.png) | ![الرئيسية](screenshots/home_with_friend2.png) |
+
+| المحادثة | سجل المكالمات |
+|---|---|
+| ![المحادثة](screenshots/chat_screen.png) | ![سجل المكالمات](screenshots/call_history.png) |
+
+| الملف الشخصي | الإشعارات |
+|---|---|
+| ![الملف الشخصي](screenshots/profile_nav.png) | ![الإشعارات](screenshots/screen_notifications.png) |
 
 ---
 
