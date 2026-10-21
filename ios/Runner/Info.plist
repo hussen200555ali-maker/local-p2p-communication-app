@@ -49,6 +49,8 @@
 	<!-- الإضافات المطلوبة -->
 	<key>NSCameraUsageDescription</key>
 	<string>يستخدم التطبيق الكاميرا لالتقاط الصور للمنشورات</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>يستخدم التطبيق الميكروفون لإجراء المكالمات الصوتية والمرئية</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>يستخدم التطبيق المعرض لاختيار الصور للمنشورات</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

@@ -1,5 +1,32 @@
 # STATUS.md — تتبع التقدم
 
+## المرحلة 13: إصلاح المكالمات — أذونات + مسار البدء + تحصين PeerConnection (21 أكتوبر 2026)
+
+### الخطة (معتمدة)
+التفاصيل الكاملة في `docs/plans/call-fix.md`. الملخص:
+1. طلب أذونات الكاميرا/الميكروفون وقت التشغيل قبل `getUserMedia` + إضافة `NSMicrophoneUsageDescription` لـ iOS.
+2. إرجاع استدعاء `_networkService.startCall()` المحذوف بتعديل DIAG + تنظيف أسطر DIAG.
+3. تحويل `_createPeerConnection` إلى `Future<bool>` ومنع انهيار `_peerConnection!`.
+4. قيود وسائط صريحة + fallback صوتي عند فشل الفيديو.
+
+### الحالة: مكتمل كودياً — بانتظار الاختبار الميداني
+
+### التنفيذ (21 أكتوبر 2026)
+- `call_manager.dart`:
+  - إضافة `_ensureMediaPermissions()`: طلب `microphone` (+ `camera` للفيديو) على Android/iOS قبل `getUserMedia`.
+  - `_createPeerConnection` أصبحت `Future<bool>` ولا تبتلع الفشل؛ تُنظّف وتُرجع false، فلا يحدث انهيار `_peerConnection!`.
+  - `_acquireLocalStream()`: قيود صريحة للفيديو (`facingMode: user`) + fallback صوتي تلقائي عند فشل مسار الكاميرا.
+  - إرجاع `await _networkService.startCall(receiverId, callType)` (كان محذوفاً بتعديل DIAG) + إزالة أسطر DIAG وحذف استيراد `log_service` غير المستخدم.
+  - `acceptCall`: عند فشل الوسائط يتم `rejectCall` وتنظيف بدل متابعة مصافحة ناقصة.
+  - عند فشل بدء المكالمة بعد إنشائها: `endCall` لتفادي رنين معلّق.
+- `ios/Runner/Info.plist`: إضافة `NSMicrophoneUsageDescription`.
+- التحقق: `flutter analyze` بلا أخطاء (فقط 32 info قديمة)، `flutter build apk --debug` ✅، `flutter build windows --release` ✅.
+
+### المتبقي
+- اختبار ميداني بين جهازين (صوت ثم فيديو) وتوثيق النتيجة هنا.
+
+---
+
 ## المرحلة 12: تشخيص مكالمة الفيديو — نقاط DIAG الست (10 أغسطس 2026)
 
 ### الخطة (معتمدة سابقاً — نفذت كما هي، بلا إصلاح)

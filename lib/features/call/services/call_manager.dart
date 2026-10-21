@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../../core/services/local_network_service.dart';
-import '../../../core/services/log_service.dart';
 import '../models/call_model.dart';
 import 'call_audio_service.dart';
 import 'call_vibration_service.dart';
@@ -160,17 +160,23 @@ class CallManager {
 
   // بدء مكالمة جديدة
   Future<void> startCall(String receiverId, CallType callType) async {
+    CallModel? activeCall;
     try {
       if (!_isInitialized) await initialize();
-      await _createPeerConnection(callType);
-      LogService.d('DIAG caller after createPeerConnection callType=$callType pcIsNull=${_peerConnection == null}');
+      final ready = await _createPeerConnection(callType);
+      if (!ready || _peerConnection == null) {
+        debugPrint('startCall: failed to prepare media or peer connection');
+        _cleanupCall();
+        return;
+      }
 
       final offer = await _peerConnection!.createOffer();
       await _peerConnection!.setLocalDescription(offer);
-      LogService.d('DIAG caller startCall callType=$callType entering networkService.startCall');
-      CallModel? activeCall;
+
+      await _networkService.startCall(receiverId, callType);
       for (final c in _networkService.getActiveCalls()) {
-        if (c.receiverId == receiverId && (c.status == CallStatus.ringing || c.status == CallStatus.active)) {
+        if (c.receiverId == receiverId &&
+            (c.status == CallStatus.ringing || c.status == CallStatus.active)) {
           activeCall = c;
           break;
         }
@@ -180,15 +186,17 @@ class CallManager {
         _cleanupCall();
         return;
       }
+      _currentCall = activeCall;
       _networkService.sendWebRTCSignal(
         activeCall.id,
         receiverId,
         {'type': 'offer', 'sdp': offer.sdp},
       );
-      LogService.d('DIAG caller offerSent');
     } catch (e) {
-      LogService.d('DIAG caller startCall CATCH pcIsNull=${_peerConnection == null} e=$e');
       debugPrint('Error starting call: $e');
+      if (activeCall != null) {
+        await _networkService.endCall(activeCall.id);
+      }
       _cleanupCall();
     }
   }
@@ -206,7 +214,13 @@ class CallManager {
 
       _isHandshakeComplete = false;
       _currentCall = call;
-      await _createPeerConnection(call.callType);
+      final ready = await _createPeerConnection(call.callType);
+      if (!ready) {
+        debugPrint('acceptCall: failed to prepare media, rejecting call');
+        await _networkService.rejectCall(callId);
+        _cleanupCall();
+        return;
+      }
 
       await _drainPendingSignals();
 
@@ -411,21 +425,79 @@ class CallManager {
     }
   }
 
-  Future<void> _createPeerConnection(CallType callType) async {
-    if (_peerConnection != null) return;
+  Future<bool> _ensureMediaPermissions(CallType callType) async {
+    if (Platform.isWindows || Platform.isLinux) return true;
+    final permissions = <Permission>[Permission.microphone];
+    if (callType == CallType.video) {
+      permissions.add(Permission.camera);
+    }
     try {
-      _localStream = await navigator.mediaDevices.getUserMedia({
+      final statuses = await permissions.request();
+      final denied = statuses.entries.where((e) => !e.value.isGranted);
+      if (denied.isNotEmpty) {
+        debugPrint('Media permissions denied: $statuses');
+        return false;
+      }
+      return true;
+    } catch (e) {
+      debugPrint('Error requesting media permissions: $e');
+      return false;
+    }
+  }
+
+  Future<MediaStream> _acquireLocalStream(CallType callType) async {
+    if (callType != CallType.video) {
+      return navigator.mediaDevices.getUserMedia({'audio': true});
+    }
+    try {
+      return await navigator.mediaDevices.getUserMedia({
         'audio': true,
-        'video': callType == CallType.video,
+        'video': {
+          'mandatory': <String, dynamic>{},
+          'optional': <Map<String, dynamic>>[
+            {'facingMode': 'user'},
+          ],
+        },
       });
+    } catch (e) {
+      debugPrint('Video getUserMedia failed, falling back to audio only: $e');
+      return navigator.mediaDevices.getUserMedia({'audio': true});
+    }
+  }
+
+  Future<void> _stopLocalStream() async {
+    try {
+      final tracks = _localStream?.getTracks() ?? [];
+      for (final track in tracks) {
+        await track.stop();
+      }
+      await _localStream?.dispose();
+    } catch (e) {
+      debugPrint('Error stopping local stream: $e');
+    }
+    _localStream = null;
+    localRenderer.srcObject = null;
+  }
+
+  Future<bool> _createPeerConnection(CallType callType) async {
+    if (_peerConnection != null) return true;
+
+    if (!await _ensureMediaPermissions(callType)) {
+      debugPrint('Cannot create peer connection without media permissions');
+      return false;
+    }
+
+    try {
+      _localStream = await _acquireLocalStream(callType);
       localRenderer.srcObject = _localStream;
 
-      _peerConnection = await createPeerConnection(_configuration);
+      final peer = await createPeerConnection(_configuration);
+      _peerConnection = peer;
       _localStream!.getTracks().forEach((track) {
-        _peerConnection!.addTrack(track, _localStream!);
+        peer.addTrack(track, _localStream!);
       });
 
-      _peerConnection!.onIceCandidate = (candidate) {
+      peer.onIceCandidate = (candidate) {
         if (_currentCall == null) {
           _pendingCandidates.add(candidate);
           return;
@@ -440,11 +512,11 @@ class CallManager {
         }
       };
 
-      _peerConnection!.onTrack = (event) {
+      peer.onTrack = (event) {
         remoteRenderer.srcObject = event.streams[0];
       };
 
-      _peerConnection!.onIceConnectionState = (state) {
+      peer.onIceConnectionState = (state) {
         debugPrint('ICE connection state: $state');
         if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
           _iceRestartAttempts = 0;
@@ -460,8 +532,12 @@ class CallManager {
       if (callType == CallType.video && !Platform.isWindows) {
         Helper.setSpeakerphoneOn(true);
       }
+      return true;
     } catch (e) {
       debugPrint('Error creating peer connection: $e');
+      await _stopLocalStream();
+      _peerConnection = null;
+      return false;
     }
   }
 
