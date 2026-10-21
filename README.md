@@ -124,17 +124,9 @@ dart run flutter_launcher_icons
 
 ## لقطات الشاشة (Screenshots)
 
-| شاشة الدخول | الرئيسية |
-|---|---|
-| ![شاشة الدخول](screenshots/login_screen.png) | ![الرئيسية](screenshots/home_with_friend2.png) |
-
-| المحادثة | سجل المكالمات |
-|---|---|
-| ![المحادثة](screenshots/chat_screen.png) | ![سجل المكالمات](screenshots/call_history.png) |
-
-| الملف الشخصي | الإشعارات |
-|---|---|
-| ![الملف الشخصي](screenshots/profile_nav.png) | ![الإشعارات](screenshots/screen_notifications.png) |
+| الرئيسية | المحادثة | واجهة التطبيق |
+|---|---|---|
+| ![الرئيسية](screenshots/screenshot4_main.png) | ![المحادثة](screenshots/chat_screen.png) | ![واجهة التطبيق](screenshots/screenshot1.png) |
 
 ---
 
