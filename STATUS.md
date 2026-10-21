@@ -1,5 +1,60 @@
 # STATUS.md — تتبع التقدم
 
+## المرحلة 12: تشخيص مكالمة الفيديو — نقاط DIAG الست (10 أغسطس 2026)
+
+### الخطة (معتمدة سابقاً — نفذت كما هي، بلا إصلاح)
+محاولة اتصال فيديو واحدة بين ali و hussen، التقاط السجلات، وتقرير يحدد نقطة الاختفاء الدقيقة والجواب: هل فشل `getUserMedia` للفيديو أم لا.
+
+### التنفيذ الميداني
+- الجهازان: ali `192.168.1.126:5555` (0e4ca7b6) — المتصل، hussen `192.168.1.127:5555` (37efd41c) — المتلقي.
+- فُتحت شاشة المحادثة على الجهازين، ثم ضُغط زر الفيديو لدى ali عند `[928,28][976,76]` (مؤكد من `chat_screen.dart` actions: `IconButton(Iconsax.video)`).
+- ali عرض "Connecting..." (شاشة المكالمة)، ثم "المكالمة منتهية" بعد إنهائها.
+- **hussen لم يستقبل أي مكالمة** — بقيت شاشته على المحادثة، لا إشعار واردة.
+
+### النتيجة من السجلات — الجواب: نعم، فشل getUserMedia للفيديو 🔴
+
+**سجل ali (المتصل) — التسلسل الكامل:**
+```
+00:59:46.089 FlutterWebRTCPlugin: getUserMedia(audio): mandatory: []...
+00:59:46.099 FlutterWebRTCPlugin: getUserMedia(video): null
+00:59:46.112 CameraManagerGlobal: Connecting to camera service
+00:59:46.187 FlutterWebRTCPlugin: Creating video capturer using Camera2 API.
+00:59:46.189 FlutterWebRTCPlugin: getUserMedia(): Failed to create new track.
+00:59:46.195 flutter: Error creating peer connection: Unable to getUserMedia: getUserMedia(): Failed to create new track.
+00:59:46.195 flutter: [DEBUG] DIAG caller after createPeerConnection callType=CallType.video pcIsNull=true
+00:59:46.212 flutter: [DEBUG] DIAG caller startCall CATCH pcIsNull=true e=Null check operator used on a null value
+00:59:46.223 flutter: Error starting call: Null check operator used on a null value
+```
+
+**سجل hussen (المتلقي):** صفر WebRTC / صفر DIAG — فقط هارت بيت PING/PONG عادي. لم يصل أي `CALL_SIGNAL` إطلاقاً.
+
+### نقطة الاختفاء الدقيقة
+- **`call_manager.dart:417-420`** داخل `_createPeerConnection()`: استدعاء `getUserMedia` فشل في إنشاء مسار الفيديو (Camera2) → رمى استثناء.
+- الـ catch (سطر 463-465) ابتلعه → `_peerConnection` بقي **null**.
+- `startCall` سطر 166: `DIAG caller after createPeerConnection pcIsNull=true`.
+- سطر 168: `_peerConnection!.createOffer()` → "Null check operator used on a null value" → سطر 190 `DIAG caller startCall CATCH`.
+- **`DIAG caller offerSent` (سطر 188) لم يُسجَّل قط — لا offer أُنشئ ولا أُرسل.** صفر رسائل CALL_SIGNAL/شبكة في سجل ali.
+
+### جدول نقاط DIAG (8 نقاط إجمالاً — 2 انطلقت، 6 لم تنطلق)
+| النقطة | الموقع | الحالة |
+|--------|--------|--------|
+| بعد createPeerConnection | call_manager.dart:166 | ✅ pcIsNull=true |
+| startCall CATCH | call_manager.dart:190 | ✅ e=Null check |
+| startCall entering | call_manager.dart:170 | ❌ لم تُصل — سطر 168 رمى قبلها |
+| offerSent | call_manager.dart:188 | ❌ لم تُنشأ |
+| UI onIncomingCall | home_screen.dart:71 | ❌ hussen لم يستقبل |
+| sendSignal | local_network_service.dart:2670 | ❌ لا إرسال |
+| recvSignal | local_network_service.dart:2699 | ❌ لا استقبال |
+| incomingCall parsed | local_network_service.dart:2743 | ❌ لا استقبال |
+
+### الخلاصة
+- **نقطة الاختفاء: على جانب المتصل حصراً، قبل أي إشارة شبكية** — في `getUserMedia(video)` داخل `_createPeerConnection`.
+- **جواب السؤال: نعم، فشل `getUserMedia` للفيديو** بالخطأ `getUserMedia(): Failed to create new track.` (مسار الفيديو Camera2 فشل في إنشاء track).
+- ملاحظة تشخيصية للطور الإصلاحي: سجل الـ plugin `getUserMedia(video): null` رغم أن الكود يمرر `'video': callType == CallType.video` (سطر 419) — أي أن القيود وصلت null عند الـ plugin، ثم فشل إنشاء المسار. هذا يستحق الفحص عند الإصلاح.
+- مؤشرات النجاح: `flutter analyze`/`build` لم يتغيرا (لا كود تعديل) — جولة تشخيص فقط.
+
+---
+
 ## المرحلة 11: إصلاح القطر الدوري للمقبس — خريطة المقابس المكسورة 🔧 (9 أغسطس 2026)
 
 ### الخلفية

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../../core/services/local_network_service.dart';
+import '../../../core/services/log_service.dart';
 import '../models/call_model.dart';
 import 'call_audio_service.dart';
 import 'call_vibration_service.dart';
@@ -162,11 +163,11 @@ class CallManager {
     try {
       if (!_isInitialized) await initialize();
       await _createPeerConnection(callType);
+      LogService.d('DIAG caller after createPeerConnection callType=$callType pcIsNull=${_peerConnection == null}');
 
       final offer = await _peerConnection!.createOffer();
       await _peerConnection!.setLocalDescription(offer);
-
-      await _networkService.startCall(receiverId, callType);
+      LogService.d('DIAG caller startCall callType=$callType entering networkService.startCall');
       CallModel? activeCall;
       for (final c in _networkService.getActiveCalls()) {
         if (c.receiverId == receiverId && (c.status == CallStatus.ringing || c.status == CallStatus.active)) {
@@ -184,7 +185,9 @@ class CallManager {
         receiverId,
         {'type': 'offer', 'sdp': offer.sdp},
       );
+      LogService.d('DIAG caller offerSent');
     } catch (e) {
+      LogService.d('DIAG caller startCall CATCH pcIsNull=${_peerConnection == null} e=$e');
       debugPrint('Error starting call: $e');
       _cleanupCall();
     }

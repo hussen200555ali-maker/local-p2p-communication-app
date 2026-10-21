@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart' show SharedPreferenc
 
 // استيراد الخدمات والنماذج والشاشات الأخرى
 import '../../../core/services/local_network_service.dart';
+import '../../../core/services/log_service.dart';
 import '../../auth/models/user_model.dart';
 import '../../auth/screens/login_screen.dart';
 import 'chat_screen.dart';
@@ -67,6 +68,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       }, onMessageDeleted: (conversationId, messageId) {  },
       // دعم المكالمات الواردة
       onIncomingCall: (call) {
+        LogService.d('DIAG UI onIncomingCall fired callType=${call.callType} callerFound=${_networkService.getUserById(call.callerId) != null}');
         if (mounted) {
           final caller = _networkService.getUserById(call.callerId);
           if (caller != null) {

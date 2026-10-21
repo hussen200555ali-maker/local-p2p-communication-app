@@ -2667,6 +2667,7 @@ class LocalNetworkService {
 
   // إرسال إشارة مكالمة إلى مستخدم
   void _sendCallSignal(String userId, Map<String, dynamic> signal) {
+    LogService.d('DIAG sendSignal type=${signal['type']} callType=${signal['callType']} callId=${signal['callId']} hasCallSocket=${_callSockets[userId] != null} hasMsgSocket=${_userSockets[userId] != null}');
     final callSocket = _callSockets[userId];
     if (callSocket != null) {
       final encryptedPayload = EncryptionService().encryptText(jsonEncode(signal));
@@ -2695,6 +2696,7 @@ class LocalNetworkService {
   // التعامل مع إشارات المكالمات الواردة
   void _handleCallSignal(Map<String, dynamic> signal) {
     final type = signal['type'];
+    LogService.d('DIAG recvSignal type=$type callType=${signal['callType']} callId=${signal['callId']}');
     LogService.d('📞 _handleCallSignal type=$type callId=${signal['callId']}');
 
     switch (type) {
@@ -2738,6 +2740,7 @@ class LocalNetworkService {
     final callId = signal['callId'];
     final callerId = signal['callerId'];
     final callType = CallType.values.firstWhere((e) => e.name == signal['callType'], orElse: () => CallType.audio);
+    LogService.d('DIAG incomingCall parsed callType=$callType raw=${signal['callType']}');
 
     final existingFromCaller = _activeCalls.values.where(
       (c) => (c.status == CallStatus.ringing || c.status == CallStatus.active) &&
