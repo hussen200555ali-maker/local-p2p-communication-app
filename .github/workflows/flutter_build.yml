@@ -1,4 +1,4 @@
-name: Build APK and Windows
+name: Build Android APK
 
 on:
   push:
@@ -35,7 +35,7 @@ jobs:
         run: flutter analyze --no-pub || true
 
       - name: Build APK (debug)
-        run: flutter build apk --debug --verbose 2>&1 | tail -80
+        run: flutter build apk --debug
 
       - name: Upload APK
         if: success()
@@ -43,53 +43,3 @@ jobs:
         with:
           name: app-debug-apk
           path: build/app/outputs/flutter-apk/app-debug.apk
-
-  build-windows:
-    name: Build Windows Release
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Configure git for symlinks
-        shell: pwsh
-        run: |
-          git config --global core.symlinks true
-          git config core.symlinks true
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          cache: true
-
-      - name: Flutter Doctor
-        run: flutter doctor -v
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build Windows Release
-        shell: pwsh
-        run: |
-          flutter build windows --release
-
-      - name: Zip Windows build
-        if: success()
-        shell: pwsh
-        run: |
-          if (Test-Path "build/windows/x64/runner/Release") {
-            Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "Alshami-Windows.zip" -Force
-          } else {
-            Write-Error "Build output not found"
-            exit 1
-          }
-
-      - name: Upload Windows Build
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Alshami-Windows
-          path: Alshami-Windows.zip
