@@ -546,7 +546,7 @@ class _ChatScreenState extends State<ChatScreen> {
             color: Color(0xFF25D366),
             shape: BoxShape.circle,
           ),
-          child: const Icon(Iconsax.message_reply, color: Colors.white, size: 18),
+          child: const Icon(Iconsax.message, color: Colors.white, size: 18),
         ),
       ),
       child: GestureDetector(
@@ -760,7 +760,7 @@ class _ChatScreenState extends State<ChatScreen> {
             color: Color(0xFF25D366),
             shape: BoxShape.circle,
           ),
-          child: const Icon(Iconsax.message_reply, color: Colors.white, size: 18),
+          child: const Icon(Iconsax.message, color: Colors.white, size: 18),
         ),
       ),
       child: GestureDetector(
