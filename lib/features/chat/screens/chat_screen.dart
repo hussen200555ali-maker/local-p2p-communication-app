@@ -930,7 +930,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              _replyingTo is Message && _replyingTo.senderId == _currentUser.id ? 'رد على نفسك' : (_replyingTo is Message ? widget.friend.username : widget.friend.username),
+                              (_replyingTo is Message && _replyingTo.senderId == _currentUser.id) ? 'رد على نفسك' : widget.friend.username,
                               style: const TextStyle(color: Color(0xFF25D366), fontSize: 12, fontWeight: FontWeight.w600),
                             ),
                             const SizedBox(height: 2),
