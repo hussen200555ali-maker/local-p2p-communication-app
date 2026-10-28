@@ -24,6 +24,63 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+class _TypingDots extends StatefulWidget {
+  const _TypingDots();
+
+  @override
+  State<_TypingDots> createState() => _TypingDotsState();
+}
+
+class _TypingDotsState extends State<_TypingDots> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(3, (index) {
+        return AnimatedBuilder(
+          animation: _controller,
+          builder: (context, child) {
+            final delay = index * 0.2;
+            final value = (_controller.value - delay).clamp(0.0, 1.0);
+            final opacity = (value < 0.5) ? (value * 2) : (1 - (value - 0.5) * 2);
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 1.5),
+              child: Opacity(
+                opacity: opacity.clamp(0.3, 1.0),
+                child: Container(
+                  width: 4,
+                  height: 4,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF25D366),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      }),
+    );
+  }
+}
+
 class _ChatScreenState extends State<ChatScreen> {
   final LocalNetworkService _networkService = LocalNetworkService();
   final TextEditingController _messageController = TextEditingController();
@@ -36,6 +93,9 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription? _connectionSubscription;
   Timer? _typingTimer;
   final Map<String, DeliveryStatus> _messageStatuses = {};
+  dynamic _replyingTo;
+  Message? _editingMessage;
+  final ImagePicker _imagePicker = ImagePicker();
 
   @override
   void initState() {
@@ -153,11 +213,34 @@ class _ChatScreenState extends State<ChatScreen> {
     final content = _messageController.text.trim();
     if (content.isEmpty) return;
 
-    // إيقاف حالة الكتابة
     _networkService.sendTypingStatus(widget.friend.id, false);
 
+    if (_editingMessage != null) {
+      final messageId = _editingMessage!.id;
+      final newContent = content;
+      final index = _messages.indexWhere((msg) => msg is Message && msg.id == messageId);
+      if (index != -1) {
+        setState(() {
+          final updatedMessage = Message(
+            id: messageId,
+            senderId: _editingMessage!.senderId,
+            receiverId: _editingMessage!.receiverId,
+            content: newContent,
+            timestamp: _editingMessage!.timestamp,
+            edited: true,
+            editedAt: DateTime.now(),
+          );
+          _messages[index] = updatedMessage;
+          _editingMessage = null;
+        });
+      }
+      _networkService.editMessage(widget.friend.id, messageId, newContent);
+      _messageController.clear();
+      return;
+    }
+
     final message = Message(
-      id: const Uuid().v4(), // <-- هنا نستخدم Uuid
+      id: const Uuid().v4(),
       senderId: _currentUser.id,
       receiverId: widget.friend.id,
       content: content,
@@ -165,20 +248,24 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     _networkService.sendMessage(message);
     _messageController.clear();
+    setState(() {
+      _replyingTo = null;
+    });
   }
 
-  Future<void> _pickAndSendImage() async {
+  Future<void> _pickAndSendImage({ImageSource source = ImageSource.gallery}) async {
     try {
-      final ImagePicker _picker = ImagePicker();
-      final XFile? image = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
+      final XFile? image = await _imagePicker.pickImage(source: source, imageQuality: 85);
       if (image != null) {
         File file = File(image.path);
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('جاري إرسال الصورة...')),
         );
         await _networkService.sendFileMessage(widget.friend.id, file, 'image');
       }
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('حدث خطأ أثناء اختيار الصورة: $e'), backgroundColor: Colors.red),
       );
@@ -255,91 +342,82 @@ class _ChatScreenState extends State<ChatScreen> {
     final isDoubtful = _networkService.isFriendDoubtful(widget.friend.id);
 
     return Scaffold(
+      backgroundColor: const Color(0xFF0B141A),
       appBar: AppBar(
-        title: Row(
-          children: [
-            Stack(
-              children: [
-                CircleAvatar(
-                  radius: 20,
-                  backgroundColor: isDoubtful ? Colors.orange : (isConnected ? Colors.teal.shade600 : Colors.grey),
-                  child: Text(
-                    widget.friend.username.isNotEmpty 
-                        ? widget.friend.username.substring(0, 1).toUpperCase() 
-                        : '?',
-                    style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
+        backgroundColor: const Color(0xFF1F2C33),
+        elevation: 0,
+        leadingWidth: 70,
+        leading: InkWell(
+          onTap: () => Navigator.pop(context),
+          child: Row(
+            children: [
+              const SizedBox(width: 6),
+              const Icon(Icons.arrow_back, color: Colors.white),
+              const SizedBox(width: 2),
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: isDoubtful ? Colors.orange : (isConnected ? const Color(0xFF25D366) : Colors.grey),
+                child: Text(
+                  widget.friend.username.isNotEmpty
+                      ? widget.friend.username.substring(0, 1).toUpperCase()
+                      : '?',
+                  style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
                 ),
-                Positioned(
-                  bottom: 0,
-                  right: 0,
-                  child: Container(
-                    width: 12,
-                    height: 12,
-                    decoration: BoxDecoration(
-                      color: isDoubtful ? Colors.orange : (isConnected ? Colors.green : Colors.grey.shade400),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 2),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.friend.username,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
-                  if (_isTyping)
-                    Text(
-                      'يكتب الآن...',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.greenAccent.shade100,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    )
-                  else if (isDoubtful)
-                    Row(
-                      children: [
-                        SizedBox(
-                          width: 10, height: 10,
-                          child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.orange.shade300),
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          'جارٍ التحقق...',
-                          style: TextStyle(fontSize: 12, color: Colors.orange.shade200, fontStyle: FontStyle.italic),
-                        ),
-                      ],
-                    )
-                  else
-                    Text(
-                      isConnected ? 'متصل' : 'غير متصل',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: isConnected ? Colors.white70 : Colors.white54,
-                      ),
-                    ),
-                ],
               ),
+            ],
+          ),
+        ),
+        titleSpacing: 0,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.friend.username,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
             ),
+            const SizedBox(height: 1),
+            if (_isTyping)
+              Row(
+                children: const [
+                  _TypingDots(),
+                  SizedBox(width: 6),
+                  Text(
+                    'يكتب',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF25D366),
+                    ),
+                  ),
+                ],
+              )
+            else if (isDoubtful)
+              const Text(
+                'جارٍ التحقق...',
+                style: TextStyle(fontSize: 12, color: Colors.orange),
+              )
+            else
+              Text(
+                isConnected ? 'متصل' : 'غير متصل',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: isConnected ? const Color(0xFF25D366) : Colors.white60,
+                ),
+              ),
           ],
         ),
         actions: [
           IconButton(
-            icon: const Icon(Iconsax.call),
+            icon: const Icon(Iconsax.call, color: Colors.white),
             onPressed: () => _startCall(CallType.audio),
           ),
           IconButton(
-            icon: const Icon(Iconsax.video),
+            icon: const Icon(Iconsax.video, color: Colors.white),
             onPressed: () => _startCall(CallType.video),
           ),
           PopupMenuButton<String>(
+            icon: const Icon(Iconsax.more, color: Colors.white),
+            color: const Color(0xFF1F2C33),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             onSelected: (value) {
               if (value == 'options') {
                 _showChatOptions();
@@ -348,9 +426,12 @@ class _ChatScreenState extends State<ChatScreen> {
             itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
               const PopupMenuItem<String>(
                 value: 'options',
-                child: ListTile(
-                  leading: Icon(Iconsax.more),
-                  title: Text('خيارات'),
+                child: Row(
+                  children: [
+                    Icon(Iconsax.more, color: Colors.white),
+                    SizedBox(width: 10),
+                    Text('خيارات', style: TextStyle(color: Colors.white)),
+                  ],
                 ),
               ),
             ],
@@ -360,20 +441,78 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: [
           Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.all(10.0),
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                final message = _messages[index];
-                final isMe = message.senderId == _currentUser.id;
-                if (message is FileMessage) {
-                  return _buildFileMessageBubble(message, isMe);
-                } else if (message is Message) {
-                  return _buildTextMessageBubble(message, isMe);
-                }
-                return const SizedBox.shrink();
-              },
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Color(0xFF0B141A),
+              ),
+              child: ListView.builder(
+                controller: _scrollController,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+                itemCount: _messages.length,
+                itemBuilder: (context, index) {
+                  final message = _messages[index];
+                  final isMe = message.senderId == _currentUser.id;
+
+                  DateTime getDate(dynamic m) {
+                    if (m is Message) return m.timestamp;
+                    if (m is FileMessage) return m.timestamp;
+                    return DateTime.now();
+                  }
+
+                  bool isSameSender(dynamic a, dynamic b) {
+                    if (a is Message && b is Message) return a.senderId == b.senderId;
+                    if (a is FileMessage && b is FileMessage) return a.senderId == b.senderId;
+                    return false;
+                  }
+
+                  final currentDate = getDate(message);
+                  bool showDate = false;
+                  if (index == 0) {
+                    showDate = true;
+                  } else {
+                    final previousMessage = _messages[index - 1];
+                    final previousDate = getDate(previousMessage);
+                    showDate = !_isSameDay(currentDate, previousDate);
+                  }
+
+                  bool isFirstInGroup = true;
+                  bool isLastInGroup = true;
+                  if (index > 0 && !showDate) {
+                    final previousMessage = _messages[index - 1];
+                    final prevDate = getDate(previousMessage);
+                    if (_isSameDay(currentDate, prevDate) && isSameSender(message, previousMessage)) {
+                      isFirstInGroup = false;
+                    }
+                  }
+                  if (index < _messages.length - 1) {
+                    final nextMessage = _messages[index + 1];
+                    final nextDate = getDate(nextMessage);
+                    if (_isSameDay(currentDate, nextDate) && isSameSender(message, nextMessage)) {
+                      isLastInGroup = false;
+                    }
+                  }
+
+                  Widget bubble;
+                  if (message is FileMessage) {
+                    bubble = _buildFileMessageBubble(message, isMe, isFirstInGroup: isFirstInGroup, isLastInGroup: isLastInGroup);
+                  } else if (message is Message) {
+                    bubble = _buildTextMessageBubble(message, isMe, isFirstInGroup: isFirstInGroup, isLastInGroup: isLastInGroup);
+                  } else {
+                    return const SizedBox.shrink();
+                  }
+
+                  if (showDate) {
+                    return Column(
+                      children: [
+                        _buildDateSeparator(currentDate),
+                        bubble,
+                      ],
+                    );
+                  }
+
+                  return bubble;
+                },
+              ),
             ),
           ),
           _buildMessageInputField(),
@@ -382,81 +521,180 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildTextMessageBubble(Message message, bool isMe) {
+  Widget _buildTextMessageBubble(Message message, bool isMe, {bool isFirstInGroup = true, bool isLastInGroup = true}) {
     final deliveryStatus = _messageStatuses[message.id];
 
-    return InkWell(
-        onLongPress: () => _showMessageOptions(message),
-      child: Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 5.0, horizontal: 8.0),
-        padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
-        decoration: BoxDecoration(
-          color: isMe ? Colors.teal.shade600 : Colors.white,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(16),
-            topRight: const Radius.circular(16),
-            bottomLeft: isMe ? const Radius.circular(16) : const Radius.circular(2),
-            bottomRight: isMe ? const Radius.circular(2) : const Radius.circular(16),
+    final topLeft = (isMe || !isFirstInGroup) ? const Radius.circular(16) : const Radius.circular(4);
+    final topRight = (isMe && !isFirstInGroup) ? const Radius.circular(16) : (isMe ? const Radius.circular(4) : const Radius.circular(16));
+    final bottomLeft = isMe ? const Radius.circular(16) : (isLastInGroup ? const Radius.circular(16) : const Radius.circular(4));
+    final bottomRight = isMe ? (isLastInGroup ? const Radius.circular(16) : const Radius.circular(4)) : const Radius.circular(16);
+
+    return Dismissible(
+      key: Key(message.id),
+      direction: DismissDirection.startToEnd,
+      confirmDismiss: (_) async {
+        _replyToMessage(message);
+        return false;
+      },
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: const BoxDecoration(
+            color: Color(0xFF25D366),
+            shape: BoxShape.circle,
           ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.08),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
-            ),
-          ],
+          child: const Icon(Iconsax.message_reply, color: Colors.white, size: 18),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(message.content, style: TextStyle(color: isMe ? Colors.white : Colors.black87, fontSize: 15, height: 1.3)),
-            const SizedBox(height: 4),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                if (isMe) ...[
-                  _buildDeliveryStatusIcon(deliveryStatus, message.read),
-                  const SizedBox(width: 4),
-                ],
-                Text(
-                  _formatDateTime(message.timestamp),
-                  style: TextStyle(fontSize: 11, color: isMe ? Colors.white60 : Colors.grey.shade500),
+      ),
+      child: GestureDetector(
+        onLongPress: () => _showMessageOptions(message),
+        child: Align(
+          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+          child: Container(
+            margin: EdgeInsets.only(
+              top: isFirstInGroup ? 4 : 2,
+              bottom: isLastInGroup ? 6 : 2,
+              left: 6,
+              right: 6,
+            ),
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+            constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
+            decoration: BoxDecoration(
+              color: isMe ? const Color(0xFF005C4B) : const Color(0xFF202C33),
+              borderRadius: BorderRadius.only(
+                topLeft: topLeft,
+                topRight: topRight,
+                bottomLeft: bottomLeft,
+                bottomRight: bottomRight,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.12),
+                  blurRadius: 2,
+                  offset: const Offset(0, 1),
                 ),
               ],
             ),
-          ],
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  message.content,
+                  style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.4),
+                ),
+                const SizedBox(height: 1),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    if (message.edited)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 4),
+                        child: Text(
+                          'معدّل',
+                          style: TextStyle(fontSize: 10, color: Colors.white.withOpacity(0.5)),
+                        ),
+                      ),
+                    if (isMe) ...[
+                      _buildDeliveryStatusIcon(deliveryStatus, message.read),
+                      const SizedBox(width: 4),
+                    ],
+                    Text(
+                      _formatTime(message.timestamp),
+                      style: TextStyle(fontSize: 10, color: Colors.white.withOpacity(0.6)),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       ),
-    )
     );
   }
 
   Widget _buildDeliveryStatusIcon(DeliveryStatus? status, bool read) {
     if (read && _networkService.readReceipts) {
-      return Icon(Iconsax.tick_circle2, size: 16, color: Colors.lightBlue.shade200);
+      return const Icon(Icons.done_all, size: 16, color: Color(0xFF53BDEB));
     }
     switch (status) {
       case DeliveryStatus.pending:
         return const SizedBox(
-          width: 16, height: 16,
-          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
+          width: 14,
+          height: 14,
+          child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.white60),
         );
       case DeliveryStatus.sending:
         return const SizedBox(
-          width: 16, height: 16,
-          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.amber),
+          width: 14,
+          height: 14,
+          child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.white60),
         );
       case DeliveryStatus.sent:
-        return Icon(Iconsax.message_tick, size: 16, color: Colors.white70);
+        return Icon(Icons.done, size: 16, color: Colors.white.withOpacity(0.6));
       case DeliveryStatus.failed:
-        return Icon(Iconsax.warning_2, size: 16, color: Colors.red.shade300);
+        return const Icon(Icons.error_outline, size: 16, color: Colors.redAccent);
       case null:
-        return Icon(Iconsax.message_tick, size: 16, color: Colors.white70);
+        return Icon(Icons.done, size: 16, color: Colors.white.withOpacity(0.6));
     }
+  }
+
+  String _formatTime(DateTime dateTime) {
+    final hour = dateTime.hour.toString().padLeft(2, '0');
+    final minute = dateTime.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
+  }
+
+  bool _isSameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  String _getDateLabel(DateTime dateTime) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final date = DateTime(dateTime.year, dateTime.month, dateTime.day);
+
+    if (date == today) return 'اليوم';
+    if (date == yesterday) return 'أمس';
+
+    const weekdays = ['الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت', 'الأحد'];
+    const months = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+
+    if (now.difference(dateTime).inDays < 7) {
+      return weekdays[dateTime.weekday - 1];
+    }
+
+    return '${dateTime.day} ${months[dateTime.month - 1]} ${dateTime.year}';
+  }
+
+  Widget _buildDateSeparator(DateTime dateTime) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 16),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1F2C33),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.2),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Text(
+            _getDateLabel(dateTime),
+            style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w500),
+          ),
+        ),
+      ),
+    );
   }
 
   String formatBytes(int bytes, int decimals) {
@@ -496,13 +734,36 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildFileMessageBubble(FileMessage message, bool isMe) {
-    final bool isImage = message.fileType == 'image' || 
+  Widget _buildFileMessageBubble(FileMessage message, bool isMe, {bool isFirstInGroup = true, bool isLastInGroup = true}) {
+    final bool isImage = message.fileType == 'image' ||
         ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].contains(message.fileType.toLowerCase());
 
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: InkWell(
+    final topLeft = (isMe || !isFirstInGroup) ? const Radius.circular(16) : const Radius.circular(4);
+    final topRight = (isMe && !isFirstInGroup) ? const Radius.circular(16) : (isMe ? const Radius.circular(4) : const Radius.circular(16));
+    final bottomLeft = isMe ? const Radius.circular(16) : (isLastInGroup ? const Radius.circular(16) : const Radius.circular(4));
+    final bottomRight = isMe ? (isLastInGroup ? const Radius.circular(16) : const Radius.circular(4)) : const Radius.circular(16);
+
+    return Dismissible(
+      key: Key(message.id),
+      direction: DismissDirection.startToEnd,
+      confirmDismiss: (_) async {
+        _replyToMessage(message);
+        return false;
+      },
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: const BoxDecoration(
+            color: Color(0xFF25D366),
+            shape: BoxShape.circle,
+          ),
+          child: const Icon(Iconsax.message_reply, color: Colors.white, size: 18),
+        ),
+      ),
+      child: GestureDetector(
         onTap: () async {
           if (isImage && File(message.filePath).existsSync()) {
             _showImagePreview(context, message.filePath);
@@ -511,139 +772,302 @@ class _ChatScreenState extends State<ChatScreen> {
               try {
                 await OpenFilex.open(message.filePath);
               } catch (e) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('لا يمكن فتح الملف: $e'), backgroundColor: Colors.red),
-                );
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('لا يمكن فتح الملف: $e'), backgroundColor: Colors.red),
+                  );
+                }
               }
             }
           }
         },
         onLongPress: () => _showMessageOptions(message),
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 5.0, horizontal: 8.0),
-          padding: const EdgeInsets.all(8.0),
-          width: isImage ? 250 : 220,
-          decoration: BoxDecoration(
-            color: isMe ? Colors.teal.shade600 : Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.08),
-                blurRadius: 4,
-                offset: const Offset(0, 2),
+        child: Align(
+          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+          child: Container(
+            margin: EdgeInsets.only(
+              top: isFirstInGroup ? 4 : 2,
+              bottom: isLastInGroup ? 6 : 2,
+              left: 6,
+              right: 6,
+            ),
+            padding: const EdgeInsets.all(6),
+            width: isImage ? 250 : 235,
+            decoration: BoxDecoration(
+              color: isMe ? const Color(0xFF005C4B) : const Color(0xFF202C33),
+              borderRadius: BorderRadius.only(
+                topLeft: topLeft,
+                topRight: topRight,
+                bottomLeft: bottomLeft,
+                bottomRight: bottomRight,
               ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (isImage && File(message.filePath).existsSync())
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.file(
-                    File(message.filePath),
-                    height: 200,
-                    width: double.infinity,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => _buildFileIcon(message, isMe),
-                  ),
-                )
-              else
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: (isMe ? Colors.white : Colors.teal).withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(10),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.12),
+                  blurRadius: 2,
+                  offset: const Offset(0, 1),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (isImage && File(message.filePath).existsSync())
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.file(
+                      File(message.filePath),
+                      height: 200,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Container(
+                        height: 200,
+                        color: Colors.black26,
+                        child: const Center(child: Icon(Iconsax.image, color: Colors.white54, size: 40)),
                       ),
-                      child: _buildFileIcon(message, isMe),
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(message.fileName, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: isMe ? Colors.white : Colors.black87), overflow: TextOverflow.ellipsis),
-                          const SizedBox(height: 2),
-                          Text(formatBytes(message.fileSize, 1), style: TextStyle(fontSize: 11, color: isMe ? Colors.white60 : Colors.grey.shade500)),
-                        ],
+                  )
+                else
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(Iconsax.document_text, color: Colors.white.withOpacity(0.9), size: 28),
                       ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              message.fileName,
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.white),
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              formatBytes(message.fileSize, 1),
+                              style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.6)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                const SizedBox(height: 2),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    if (isMe) ...[
+                      _buildDeliveryStatusIcon(_messageStatuses[message.id], message.read),
+                      const SizedBox(width: 4),
+                    ],
+                    Text(
+                      _formatTime(message.timestamp),
+                      style: TextStyle(fontSize: 10, color: Colors.white.withOpacity(0.6)),
                     ),
                   ],
                 ),
-              const SizedBox(height: 4),
-              Row(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              if (isMe) ...[
-                _buildDeliveryStatusIcon(_messageStatuses[message.id], message.read),
-                const SizedBox(width: 4),
               ],
-              Text(
-                _formatDateTime(message.timestamp),
-                style: TextStyle(fontSize: 11, color: isMe ? Colors.white60 : Colors.grey.shade500),
-              ),
-            ],
+            ),
           ),
-        ],
-      ),
         ),
       ),
     );
   }
 
   Widget _buildMessageInputField() {
+    final isEditing = _editingMessage != null;
+    final isReplying = _replyingTo != null;
+    String replyPreview = '';
+    if (isReplying) {
+      if (_replyingTo is Message) {
+        replyPreview = (_replyingTo as Message).content;
+      } else if (_replyingTo is FileMessage) {
+        replyPreview = '📎 ${(_replyingTo as FileMessage).fileName}';
+      }
+    }
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8.0),
-      decoration: BoxDecoration(
-        color: Theme.of(context).cardColor,
-        boxShadow: [BoxShadow(offset: const Offset(0, -1), blurRadius: 4, color: Colors.black.withOpacity(0.06))],
-      ),
+      color: const Color(0xFF1F2C33),
       child: SafeArea(
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(icon: const Icon(Iconsax.gallery, color: Colors.teal, size: 24), onPressed: _pickAndSendImage),
-            IconButton(icon: const Icon(Iconsax.attach_square, color: Colors.teal, size: 24), onPressed: _pickAndSendFile),
-            Expanded(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade100,
-                  borderRadius: BorderRadius.circular(24),
+            if (isReplying)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.only(left: 12, right: 8, top: 6, bottom: 6),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF1F2C33),
+                  border: Border(top: BorderSide(color: Colors.white10)),
                 ),
-                child: TextField(
-                  controller: _messageController,
-                  decoration: InputDecoration(
-                    hintText: 'اكتب رسالتك...',
-                    hintStyle: TextStyle(color: Colors.grey.shade400),
-                    border: InputBorder.none,
+                child: Row(
+                  children: [
+                    Container(
+                      width: 3,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF25D366),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2A3942),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _replyingTo is Message && _replyingTo.senderId == _currentUser.id ? 'رد على نفسك' : (_replyingTo is Message ? widget.friend.username : widget.friend.username),
+                              style: const TextStyle(color: Color(0xFF25D366), fontSize: 12, fontWeight: FontWeight.w600),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              replyPreview,
+                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white60, size: 20),
+                      onPressed: _cancelReply,
+                    ),
+                  ],
+                ),
+              ),
+            if (isEditing)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.only(left: 12, right: 8, top: 6, bottom: 6),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF1F2C33),
+                  border: Border(top: BorderSide(color: Colors.white10)),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 3,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF25D366),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2A3942),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'تعديل الرسالة',
+                              style: TextStyle(color: Color(0xFF25D366), fontSize: 12, fontWeight: FontWeight.w600),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              _editingMessage!.content,
+                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white60, size: 20),
+                      onPressed: () {
+                        setState(() {
+                          _editingMessage = null;
+                          _messageController.clear();
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+              child: Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Iconsax.gallery, color: Colors.white70),
+                    onPressed: () => _pickAndSendImage(source: ImageSource.gallery),
                   ),
-                  maxLines: 4,
-                  minLines: 1,
-                  textInputAction: TextInputAction.newline,
-                  onSubmitted: (_) => _sendMessage(),
-                  onChanged: (value) {
-                    _networkService.sendTypingStatus(widget.friend.id, true);
-                    _typingTimer?.cancel();
-                    _typingTimer = Timer(const Duration(seconds: 1), () {
-                      _networkService.sendTypingStatus(widget.friend.id, false);
-                    });
-                  },
-                ),
-              ),
-            ),
-            const SizedBox(width: 4),
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: const BoxDecoration(
-                color: Colors.teal,
-                shape: BoxShape.circle,
-              ),
-              child: InkWell(
-                onTap: _sendMessage,
-                child: const Icon(Iconsax.send_1, color: Colors.white, size: 20),
+                  IconButton(
+                    icon: const Icon(Iconsax.camera, color: Colors.white70),
+                    onPressed: () => _pickAndSendImage(source: ImageSource.camera),
+                  ),
+                  IconButton(
+                    icon: const Icon(Iconsax.attach_square, color: Colors.white70),
+                    onPressed: _pickAndSendFile,
+                  ),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A3942),
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                      child: TextField(
+                        controller: _messageController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: _editingMessage != null ? 'عدّل الرسالة...' : 'اكتب رسالة...',
+                          hintStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
+                          border: InputBorder.none,
+                        ),
+                        maxLines: 5,
+                        minLines: 1,
+                        textInputAction: TextInputAction.newline,
+                        onChanged: (value) {
+                          if (_editingMessage != null) return;
+                          _networkService.sendTypingStatus(widget.friend.id, value.trim().isNotEmpty);
+                          _typingTimer?.cancel();
+                          if (value.trim().isNotEmpty) {
+                            _typingTimer = Timer(const Duration(seconds: 1), () {
+                              if (mounted) {
+                                _networkService.sendTypingStatus(widget.friend.id, false);
+                              }
+                            });
+                          }
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Container(
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF25D366),
+                      shape: BoxShape.circle,
+                    ),
+                    child: IconButton(
+                      icon: Icon(_editingMessage != null ? Icons.check : Iconsax.send_1, color: Colors.white, size: 20),
+                      onPressed: _sendMessage,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -893,57 +1317,80 @@ class _ChatScreenState extends State<ChatScreen> {
   }*/
   void _showMessageOptions(dynamic message) {
     final bool isMyMessage = message.senderId == _currentUser.id;
+    final isTextMessage = message is Message;
 
     showModalBottomSheet(
       context: context,
+      backgroundColor: const Color(0xFF1F2C33),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
       builder: (context) {
         return SafeArea(
-          child: Wrap(
-            children: <Widget>[
-              // **الإضافة الجديدة**: عرض خيار التعديل للرسائل النصية الخاصة بالمستخدم فقط
-              if (isMyMessage && message is Message)
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                if (isMyMessage && isTextMessage)
+                  ListTile(
+                    leading: const Icon(Iconsax.edit, color: Color(0xFF25D366)),
+                    title: const Text('تعديل الرسالة', style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      setState(() {
+                        _editingMessage = message as Message;
+                        _messageController.text = (message as Message).content;
+                        _replyingTo = null;
+                      });
+                      FocusScope.of(context).requestFocus(FocusNode());
+                      Future.delayed(const Duration(milliseconds: 100), () {
+                        FocusScope.of(context).requestFocus(FocusNode());
+                      });
+                    },
+                  ),
+                if (isMyMessage)
+                  ListTile(
+                    leading: const Icon(Iconsax.trash, color: Colors.redAccent),
+                    title: const Text('حذف الرسالة', style: TextStyle(color: Colors.redAccent)),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      _confirmDeleteMessage(message);
+                    },
+                  ),
                 ListTile(
-                  leading: const Icon(Iconsax.edit),
-                  title: const Text('تعديل الرسالة'),
+                  leading: const Icon(Iconsax.message_reply, color: Colors.white70),
+                  title: const Text('رد على الرسالة', style: TextStyle(color: Colors.white)),
                   onTap: () {
                     Navigator.of(context).pop();
-                    _showEditMessageDialog(message); // استدعاء نافذة التعديل
+                    _replyToMessage(message);
                   },
                 ),
-
-              if (isMyMessage)
-                ListTile(
-                  leading: const Icon(Iconsax.trash, color: Colors.red),
-                  title: const Text('حذف الرسالة', style: TextStyle(color: Colors.red)),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    _confirmDeleteMessage(message);
-                  },
-                ),
-
-              // خيار الرد على الرسالة
-              ListTile(
-                leading: const Icon(Iconsax.message),
-                title: const Text('رد على الرسالة'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _replyToMessage(message);
-                },
-              ),
-
-              if (message is Message) // النسخ للرسائل النصية فقط
-                ListTile(
-                  leading: const Icon(Iconsax.copy),
-                  title: const Text('نسخ النص'),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    Clipboard.setData(ClipboardData(text: message.content));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('تم نسخ النص')),
-                    );
-                  },
-                ),
-            ],
+                if (isTextMessage)
+                  ListTile(
+                    leading: const Icon(Iconsax.copy, color: Colors.white70),
+                    title: const Text('نسخ النص', style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      Clipboard.setData(ClipboardData(text: (message as Message).content));
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('تم نسخ النص')),
+                        );
+                      }
+                    },
+                  ),
+              ],
+            ),
           ),
         );
       },
@@ -1035,25 +1482,23 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // الرد على الرسالة
   void _replyToMessage(dynamic message) {
-    String replyContent = '';
-    if (message is Message) {
-      replyContent = message.content;
-    } else if (message is FileMessage) {
-      replyContent = 'ملف: ${message.fileName}';
-    }
-
-    _messageController.text = ''; // مسح النص الحالي
-    FocusScope.of(context).requestFocus(FocusNode()); // إزالة التركيز عن حقل الإدخال
-    Future.delayed(const Duration(milliseconds: 100), () {
-      FocusScope.of(context).requestFocus(FocusNode()); // إعادة التركيز بعد مسح
-      _messageController.text = 'الرد: "$replyContent"\n\n';
-      FocusScope.of(context).requestFocus(FocusNode()); // التركيز على حقل الإدخال
+    setState(() {
+      _replyingTo = message;
+      _editingMessage = null;
     });
+    _messageController.clear();
+    FocusScope.of(context).unfocus();
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        FocusScope.of(context).requestFocus();
+      }
+    });
+  }
 
-    // عرض إشعار بأن المستخدم يرد على رسالة
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('اكتب ردك على الرسالة')),
-    );
+  void _cancelReply() {
+    setState(() {
+      _replyingTo = null;
+    });
   }
 
   // --- Call Feature Methods ---
