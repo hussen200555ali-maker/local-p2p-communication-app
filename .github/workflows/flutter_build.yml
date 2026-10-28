@@ -50,6 +50,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git for symlinks
+        shell: pwsh
+        run: |
+          git config --global core.symlinks true
+          git config core.symlinks true
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -64,13 +72,20 @@ jobs:
         run: flutter pub get
 
       - name: Build Windows Release
-        run: flutter build windows --release --verbose 2>&1 | tail -80
+        shell: pwsh
+        run: |
+          flutter build windows --release
 
       - name: Zip Windows build
         if: success()
         shell: pwsh
         run: |
-          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath Alshami-Windows.zip -Force
+          if (Test-Path "build/windows/x64/runner/Release") {
+            Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "Alshami-Windows.zip" -Force
+          } else {
+            Write-Error "Build output not found"
+            exit 1
+          }
 
       - name: Upload Windows Build
         if: success()
