@@ -76,42 +76,22 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Replace plugin symlinks with copies
+      - name: Replace flutter_webrtc symlink with real copy
         run: |
           $ErrorActionPreference = "SilentlyContinue"
-          $symlinkDir = "windows/flutter/ephemeral/.plugin_symlinks"
-          if (Test-Path $symlinkDir) {
-            Get-ChildItem -Path $symlinkDir -Directory | ForEach-Object {
-              $linkPath = $_.FullName
-              $name = $_.Name
-              try {
-                $item = Get-Item $linkPath -Force
-                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                  $target = $item.Target
-                  if (-not $target) {
-                    $target = $item.ResolvedTarget
-                  }
-                  if (-not $target) {
-                    $out = cmd /c "fsutil reparsepoint query `"$linkPath`"" 2>&1
-                  }
-                  $source = $null
-                  if ($target) {
-                    $source = $target
-                  } else {
-                    $pubCache = "$env:LOCALAPPDATA\Pub\Cache\hosted\pub.dev"
-                    $srcDir = Get-ChildItem -Path $pubCache -Directory -Filter "$name-*" | Sort-Object Name -Descending | Select-Object -First 1
-                    if ($srcDir) { $source = $srcDir.FullName }
-                  }
-                  if ($source -and (Test-Path $source)) {
-                    Write-Host "Converting symlink to copy: $name"
-                    cmd /c "rmdir /s /q `"$linkPath`"" 2>$null
-                    Remove-Item $linkPath -Force -Recurse -ErrorAction SilentlyContinue
-                    New-Item -ItemType Directory -Path $linkPath -Force | Out-Null
-                    Copy-Item -Path "$source\*" -Destination $linkPath -Recurse -Force
-                  }
-                }
-              } catch {}
-            }
+          $linkPath = "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
+          if (Test-Path $linkPath) {
+            cmd /c "rmdir `"$linkPath`" 2>nul"
+            Remove-Item $linkPath -Force -Recurse -ErrorAction SilentlyContinue
+          }
+          $pubCache = "$env:LOCALAPPDATA\Pub\Cache\hosted\pub.dev"
+          $src = Get-ChildItem -Path $pubCache -Directory -Filter "flutter_webrtc-*" | Sort-Object Name -Descending | Select-Object -First 1
+          if ($src) {
+            New-Item -ItemType Directory -Path $linkPath -Force | Out-Null
+            robocopy $src.FullName $linkPath /E /R:3 /W:1 /NFL /NDL /NJH /NJS
+            Write-Host "Replaced flutter_webrtc symlink with real copy"
+          } else {
+            Write-Warning "flutter_webrtc not found in pub cache"
           }
 
       - name: Build Windows Release
