@@ -76,6 +76,17 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Fix flutter_webrtc symlink issue
+        run: |
+          $symlink = "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
+          if (Test-Path $symlink) {
+            $target = (Get-Item $symlink).Target
+            if ($target) {
+              Remove-Item $symlink -Force
+              Copy-Item -Path $target -Destination $symlink -Recurse -Force
+            }
+          }
+
       - name: Build Windows Release
         run: flutter build windows --release
 
