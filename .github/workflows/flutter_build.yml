@@ -83,17 +83,35 @@ jobs:
             Get-ChildItem -Path $symlinkDir -Directory | ForEach-Object {
               $linkPath = $_.FullName
               $item = Get-Item $linkPath -Force
-              if ($item.LinkType -eq "SymbolicLink" -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-                $target = $item.Target
+              $isLink = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+              if ($isLink) {
+                $target = $null
+                try {
+                  $target = $item.Target
+                } catch {}
                 if (-not $target) {
-                  $target = $item | ForEach-Object { $_.ResolvedTarget } 2>$null
+                  $target = (& cmd /c "dir /al `"$linkPath`"" 2>&1 | Select-String "->" | ForEach-Object { $_.ToString().Split("->")[-1].Trim() })
                 }
-                if ($target) {
+                if ($target -and (Test-Path $target)) {
                   Write-Host "Converting symlink to copy: $($_.Name)"
-                  Remove-Item $linkPath -Recurse -Force
-                  New-Item -ItemType Directory -Path $linkPath -Force | Out-Null
-                  Copy-Item -Path "$target\*" -Destination $linkPath -Recurse -Force
+                  cmd /c "rmdir /s /q `"$linkPath`""
+                  Remove-Item $linkPath -Force -ErrorAction SilentlyContinue
+                  Copy-Item -Path $target -Destination $linkPath -Recurse -Force
                 }
+              }
+            }
+          }
+          # Also fix flutter_webrtc specifically
+          $webrtcLink = "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
+          if (Test-Path $webrtcLink) {
+            $item = Get-Item $webrtcLink -Force
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+              $pubCache = "$env:LOCALAPPDATA\Pub\Cache\hosted\pub.dev"
+              $webrtcDir = Get-ChildItem -Path $pubCache -Directory -Filter "flutter_webrtc-*" | Sort-Object Name -Descending | Select-Object -First 1
+              if ($webrtcDir) {
+                cmd /c "rmdir /s /q `"$webrtcLink`""
+                Remove-Item $webrtcLink -Force -ErrorAction SilentlyContinue
+                Copy-Item -Path $webrtcDir.FullName -Destination $webrtcLink -Recurse -Force
               }
             }
           }
