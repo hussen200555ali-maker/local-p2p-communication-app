@@ -83,12 +83,16 @@ jobs:
             Get-ChildItem -Path $symlinkDir -Directory | ForEach-Object {
               $linkPath = $_.FullName
               $item = Get-Item $linkPath -Force
-              if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+              if ($item.LinkType -eq "SymbolicLink" -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
                 $target = $item.Target
+                if (-not $target) {
+                  $target = $item | ForEach-Object { $_.ResolvedTarget } 2>$null
+                }
                 if ($target) {
-                  Write-Host "Converting symlink to copy: $linkPath -> $target"
+                  Write-Host "Converting symlink to copy: $($_.Name)"
                   Remove-Item $linkPath -Recurse -Force
-                  Copy-Item -Path $target -Destination $linkPath -Recurse -Force
+                  New-Item -ItemType Directory -Path $linkPath -Force | Out-Null
+                  Copy-Item -Path "$target\*" -Destination $linkPath -Recurse -Force
                 }
               }
             }
